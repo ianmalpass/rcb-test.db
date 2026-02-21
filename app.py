@@ -90,7 +90,7 @@ def main():
             with st.form("test_form"):
                 col1, col2 = st.columns(2)
                 with col1:
-                    product = st.selectbox("Product Selection", ["Product Alpha", "Product Beta"])
+                    product = st.selectbox("Product Selection", ["Revolution CB", "Paris CB"])
                     p_size = st.number_input("Particle Size (µm)", min_value=0.0, format="%.4f")
                     hardness = st.number_input("Pellet Hardness (N)", min_value=0.0, format="%.2f")
                 with col2:
@@ -111,3 +111,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
