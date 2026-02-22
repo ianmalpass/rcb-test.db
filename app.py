@@ -6,7 +6,7 @@ import hashlib
 import os
 
 # --- PATH CONFIGURATION ---
-DB_PATH = r"E:\OneDrive - British American Rubber Company\Apps\rcb_tests.db"
+DB_PATH = rcb_tests_v2.db"
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -162,5 +162,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
