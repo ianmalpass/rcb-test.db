@@ -6,18 +6,20 @@ import hashlib
 import os
 
 # --- PATH CONFIGURATION ---
-DB_PATH = "rcb_tests_v2.db"
+# Using v3 to ensure the database starts fresh with Customer and Shipped Date columns
+DB_PATH = "rcb_tests_v3.db"
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # Added ash_content REAL to the table schema
     c.execute('''CREATE TABLE IF NOT EXISTS test_results (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     bag_ref TEXT UNIQUE,
                     timestamp DATETIME,
                     operator TEXT,
                     product TEXT,
+                    customer_name TEXT,
+                    shipped_date TEXT,
                     particle_size REAL,
                     pellet_hardness REAL,
                     moisture REAL,
@@ -27,14 +29,16 @@ def init_db():
     conn.commit()
     conn.close()
 
-def add_test_entry(bag_ref, operator, product, p_size, hardness, moisture, toluene, ash, weight):
+def add_test_entry(bag_ref, operator, product, customer, ship_date, p_size, hardness, moisture, toluene, ash, weight):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     c.execute('''INSERT INTO test_results 
-                 (bag_ref, timestamp, operator, product, particle_size, pellet_hardness, moisture, toluene, ash_content, weight)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', 
-              (bag_ref, timestamp, operator, product, p_size, hardness, moisture, toluene, ash, weight))
+                 (bag_ref, timestamp, operator, product, customer_name, shipped_date, 
+                  particle_size, pellet_hardness, moisture, toluene, ash_content, weight)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', 
+              (bag_ref, timestamp, operator, product, customer, str(ship_date), 
+               p_size, hardness, moisture, toluene, ash, weight))
     conn.commit()
     conn.close()
 
@@ -95,59 +99,65 @@ def main():
                 
                 col1, col2 = st.columns(2)
                 with col1:
-                    # Updated Product Choices
                     product = st.selectbox("Product", ["Revolution CB", "Paris CB"])
+                    customer = st.text_input("Customer Name", placeholder="Enter Customer Name")
+                    ship_date = st.date_input("Shipped Date", value=datetime.today())
+                    
                     p_size = st.number_input("Particle Size (µm)", min_value=0.0, format="%.4f")
                     hardness = st.number_input("Pellet Hardness (N)", min_value=0.0, format="%.2f")
-                    weight = st.number_input("Bag Weight (kg)", min_value=0.0, value=25.0)
                 
                 with col2:
                     moisture = st.number_input("Moisture (%)", min_value=0.0, max_value=100.0, format="%.2f")
                     toluene = st.number_input("Toluene Content (mg/kg)", min_value=0.0, format="%.2f")
-                    # New Ash Content Field
                     ash = st.number_input("Ash Content (%)", min_value=0.0, max_value=100.0, format="%.2f")
+                    weight = st.number_input("Bag Weight (kg)", min_value=0.0, value=25.0)
                 
-                submitted = st.form_submit_button("Save Test Results")
+                submitted = st.form_submit_button("Save & Generate Label")
                 
                 if submitted:
-                    add_test_entry(bag_id, st.session_state['user'], product, p_size, hardness, moisture, toluene, ash, weight)
-                    st.success(f"Saved: {bag_id}")
+                    add_test_entry(bag_id, st.session_state['user'], product, customer, ship_date, 
+                                   p_size, hardness, moisture, toluene, ash, weight)
+                    st.success(f"Successfully recorded: {bag_id}")
+                    
+                    # Store data for the print label
                     st.session_state['last_bag'] = {
-                        "id": bag_id, "prod": product, "weight": weight, 
-                        "ash": ash, "moist": moisture, "time": datetime.now().strftime("%Y-%m-%d %H:%M")
+                        "id": bag_id, "prod": product, "cust": customer, 
+                        "ship": str(ship_date), "weight": weight, "ash": ash, 
+                        "moist": moisture, "time": datetime.now().strftime("%Y-%m-%d %H:%M")
                     }
 
             # Label Printing Logic
             if 'last_bag' in st.session_state:
                 st.divider()
                 label_html = f"""
-                <div id="label" style="width:280px; padding:15px; border:3px solid black; font-family:Arial; line-height:1.2;">
-                    <div style="font-size:22px; font-weight:bold; text-align:center; border-bottom:2px solid black; margin-bottom:10px;">
+                <div id="label" style="width:300px; padding:15px; border:3px solid black; font-family:Arial; line-height:1.3;">
+                    <div style="font-size:24px; font-weight:bold; text-align:center; border-bottom:2px solid black; padding-bottom:5px; margin-bottom:10px;">
                         {st.session_state['last_bag']['prod']}
                     </div>
-                    <div style="font-size:18px; text-align:center; margin-bottom:10px;">
-                        <strong>BAG ID: {st.session_state['last_bag']['id']}</strong>
+                    <div style="font-size:16px; margin-bottom:10px;">
+                        <strong>BAG ID: {st.session_state['last_bag']['id']}</strong><br>
+                        <strong>CUSTOMER: {st.session_state['last_bag']['cust']}</strong>
                     </div>
-                    <div style="font-size:14px;">
+                    <div style="font-size:14px; border-top:1px solid #ccc; padding-top:5px;">
+                        Shipped Date: {st.session_state['last_bag']['ship']}<br>
                         Weight: {st.session_state['last_bag']['weight']} kg<br>
-                        Ash: {st.session_state['last_bag']['ash']}%<br>
-                        Moisture: {st.session_state['last_bag']['moist']}%<br>
-                        Date: {st.session_state['last_bag']['time']}
+                        Ash: {st.session_state['last_bag']['ash']}% | Moisture: {st.session_state['last_bag']['moist']}%<br>
+                        <span style="font-size:10px; color:gray;">Recorded: {st.session_state['last_bag']['time']}</span>
                     </div>
                 </div>
                 <br>
-                <button onclick="window.print()" style="padding:10px 20px; background:#007BFF; color:white; border:none; border-radius:4px; cursor:pointer;">
-                    🖨️ Print Bag Label
+                <button onclick="window.print()" style="padding:12px 24px; background:#28a745; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:bold;">
+                    🖨️ Print Thermal Label
                 </button>
                 <style>
                     @media print {{
                         body * {{ visibility: hidden; }}
                         #label, #label * {{ visibility: visible; }}
-                        #label {{ position: absolute; left: 0; top: 0; border: 2px solid black !important; }}
+                        #label {{ position: absolute; left: 0; top: 0; border: 2px solid black !important; width: 100%; }}
                     }}
                 </style>
                 """
-                st.components.v1.html(label_html, height=350)
+                st.components.v1.html(label_html, height=400)
 
         elif choice == "View Database":
             st.title("📊 Historical Test Records")
@@ -155,14 +165,12 @@ def main():
             df = pd.read_sql_query("SELECT * FROM test_results ORDER BY timestamp DESC", conn)
             st.dataframe(df, use_container_width=True)
             
-            # Export to CSV for Excel
             csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Download Database as CSV", data=csv, file_name="rcb_test_history.csv", mime="text/csv")
+            st.download_button("📥 Download Excel/CSV Report", data=csv, file_name=f"rcb_report_{datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv")
             conn.close()
 
 if __name__ == '__main__':
     main()
-
 
 
 
