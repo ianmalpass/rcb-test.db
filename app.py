@@ -3,11 +3,18 @@ import sqlite3
 import pandas as pd
 from datetime import datetime, date
 import hashlib
+import shutil  # NEW: For file copying
+import os      # NEW: For directory management
 
 # --- PATH CONFIGURATION ---
 DB_PATH = "rcb_inventory_v10.db"
+BACKUP_DIR = "backups"
 
 def init_db():
+    # Ensure backup directory exists
+    if not os.path.exists(BACKUP_DIR):
+        os.makedirs(BACKUP_DIR)
+        
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     # Main Data Table
@@ -41,7 +48,19 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- DATABASE HELPERS ---
+# --- BACKUP HELPER ---
+def create_backup():
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_file = f"inventory_backup_{timestamp}.db"
+        backup_path = os.path.join(BACKUP_DIR, backup_file)
+        shutil.copy2(DB_PATH, backup_path)
+        return backup_path
+    except Exception as e:
+        return str(e)
+
+# ... [add_inventory_entry, ship_bag, generate_bag_ref, check_login remain the same] ...
+
 def add_inventory_entry(bag_ref, operator, product, p_size, hardness, moisture, toluene, ash, weight):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -84,7 +103,7 @@ def check_login(username, password):
 
 # --- UI LAYOUT ---
 def main():
-    st.set_page_config(page_title="BARC - Management Portal", layout="wide")
+    st.set_page_config(page_title="BARC - Portal", layout="wide")
     init_db()
 
     if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
@@ -214,9 +233,23 @@ def main():
         # --- VIEW RECORDS ---
         elif choice == "View Records":
             st.title("📊 Master Ledger")
+            
+            # Maintenance Section
+            with st.expander("🛠️ Database Maintenance"):
+                st.write("Create a timestamped backup of the current database.")
+                if st.button("🚀 Create Manual Backup"):
+                    result = create_backup()
+                    if "backup" in result:
+                        st.success(f"Backup created: {result}")
+                    else:
+                        st.error(f"Error: {result}")
+
             conn = sqlite3.connect(DB_PATH)
             df = pd.read_sql_query("SELECT * FROM test_results ORDER BY timestamp DESC", conn)
             st.dataframe(df, use_container_width=True)
+            
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Download Master CSV", data=csv, file_name=f"BARC_Master_{date.today()}.csv", mime="text/csv")
             conn.close()
 
         # --- USER MANAGEMENT SECTION ---
