@@ -3,4 +3,5 @@ python-barcode
 Pillow
 pandas
 plotly
+qrcode
 
