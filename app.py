@@ -204,5 +204,9 @@ def main():
 
 if __name__ == '__main__':
     main()
+import migrate
+if st.sidebar.button("🚀 RUN ONE-TIME MIGRATION"):
+    migrate.migrate()
+    st.sidebar.success("Migration Finished!")
 
 
