@@ -80,7 +80,7 @@ def main():
         menu = ["Production (Inventory)", "Shipping (FIFO)", "Stock Inquiry (Grid Map)", "View Records"]
         choice = st.sidebar.selectbox("Go to:", menu)
 
-        # --- PRODUCTION ---
+        # --- PRODUCTION & PRINTING ---
         if choice == "Production (Inventory)":
             st.title("🏗️ Bulk Production")
             next_loc = get_next_available_location()
@@ -95,84 +95,84 @@ def main():
                         weight = st.number_input("Weight (lbs)", value=2000.0)
                         hard = st.number_input("Hardness", min_value=0)
                     with c2:
-                        moist = st.number_input("Moisture %")
-                        tol = st.number_input("Toluene")
+                        moist = st.number_input("Moisture %", format="%.2f")
+                        tol = st.number_input("Toluene", step=1)
+                        ash = st.number_input("Ash %", format="%.1f")
                     
-                    if st.form_submit_button("Record Bag"):
-                        bag_id = f"RCB-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+                    if st.form_submit_button("Record & Generate Label"):
+                        bag_id = f"RCB-{datetime.now().strftime('%Y%m%d-%H%M')}"
                         conn = sqlite3.connect(DB_PATH); c = conn.cursor()
-                        c.execute("INSERT INTO test_results (bag_ref, timestamp, operator, product, location_id, weight_lbs, pellet_hardness, moisture, toluene) VALUES (?,?,?,?,?,?,?,?,?)",
-                                  (bag_id, datetime.now(), st.session_state['user_display'], prod, next_loc, weight, hard, moist, tol))
+                        c.execute("INSERT INTO test_results (bag_ref, timestamp, operator, product, location_id, weight_lbs, pellet_hardness, moisture, toluene, ash_content) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                                  (bag_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), st.session_state['user_display'], prod, next_loc, weight, hard, moist, tol, ash))
                         c.execute("UPDATE locations SET status = 'Occupied' WHERE loc_id = ?", (next_loc,))
                         conn.commit(); conn.close()
-                        st.session_state['last_qr'] = {"id": bag_id, "prod": prod, "loc": next_loc}
-                        st.success(f"Bag {bag_id} stored in {next_loc}")
+                        st.session_state['last_sack'] = {"id": bag_id, "prod": prod, "loc": next_loc, "weight": weight, "ash": ash, "hard": hard, "moist": moist}
+                        st.success(f"Recorded in {next_loc}")
 
-                if 'last_qr' in st.session_state:
-                    lqr = st.session_state['last_qr']
-                    qr_img = generate_qr_base64(lqr['id'])
-                    st.image(f"data:image/png;base64,{qr_img}", caption=f"ID: {lqr['id']} | Loc: {lqr['loc']}")
+                if 'last_sack' in st.session_state:
+                    ls = st.session_state['last_sack']
+                    qr_code = generate_qr_base64(ls['id'])
+                    
+                    label_html = f"""
+                    <div id="print-area" style="width: 60%; padding: 30px; border: 10px solid black; font-family: Arial, sans-serif; background: white; color: black; margin: auto; text-align: center;">
+                        <div style="font-size: 60px; font-weight: 900; border-bottom: 6px solid black;">{ls['prod']}</div>
+                        <div style="padding: 20px 0;">
+                            <img src="data:image/png;base64,{qr_code}" style="width: 320px;">
+                            <div style="font-size: 40px; font-weight: bold;">{ls['id']}</div>
+                        </div>
+                        <div style="font-size: 32px; border-top: 6px solid black; padding-top: 15px; text-align: left; line-height: 1.4;">
+                            <b>LOCATION:</b> {ls['loc']}<br>
+                            <b>WEIGHT:</b> {ls['weight']:.1f} LBS<br>
+                            <b>ASH:</b> {ls['ash']:.1f}% | <b>HARDNESS:</b> {int(ls['hard'])}<br>
+                            <b>MOISTURE:</b> {ls['moist']:.2f}%
+                        </div>
+                    </div>
+                    <div style="text-align: center; margin-top: 30px;">
+                        <button onclick="window.print()" style="padding: 15px 30px; background: #28a745; color: white; border: none; font-size: 20px; cursor: pointer; border-radius: 8px;">🖨️ PRINT SCALED LABEL</button>
+                    </div>
+                    <style>
+                        @media print {{
+                            body * {{ visibility: hidden; }}
+                            #print-area, #print-area * {{ visibility: visible; }}
+                            #print-area {{ position: absolute; left: 20%; top: 5%; width: 60%; }}
+                        }}
+                    </style>
+                    """
+                    st.components.v1.html(label_html, height=950)
 
         # --- SHIPPING (FIFO) ---
         elif choice == "Shipping (FIFO)":
             st.title("🚢 Auto-Dispatch (FIFO)")
-            st.write("Since products are homogenous, the system will pick the oldest bag for you.")
             ship_prod = st.selectbox("Select Product to Ship", ["Revolution CB", "Paris CB"])
-            
             conn = sqlite3.connect(DB_PATH); c = conn.cursor()
             c.execute("SELECT bag_ref, location_id, timestamp FROM test_results WHERE product = ? AND status = 'Inventory' ORDER BY timestamp ASC LIMIT 1", (ship_prod,))
-            oldest_bag = c.fetchone()
+            oldest = c.fetchone()
             
-            if oldest_bag:
-                st.success(f"Oldest {ship_prod} found!")
-                st.metric("Go to Location", oldest_bag[1])
-                st.info(f"Bag ID: {oldest_bag[0]} (Produced: {oldest_bag[2]})")
-                
-                if st.button(f"Confirm Shipment of {oldest_bag[0]}"):
-                    c.execute("UPDATE test_results SET status = 'Shipped', shipped_by = ? WHERE bag_ref = ?", (st.session_state['user_display'], oldest_bag[0]))
-                    c.execute("UPDATE locations SET status = 'Available' WHERE loc_id = ?", (oldest_bag[1],))
-                    conn.commit(); conn.close()
-                    st.balloons()
-                    st.success(f"Location {oldest_bag[1]} is now empty and available.")
-                    st.rerun()
+            if oldest:
+                st.metric("Go to Location", oldest[1])
+                st.info(f"Bag ID: {oldest[0]} | Produced: {oldest[2]}")
+                if st.button(f"Confirm Shipment of {oldest[0]}"):
+                    c.execute("UPDATE test_results SET status = 'Shipped' WHERE bag_ref = ?", (oldest[0],))
+                    c.execute("UPDATE locations SET status = 'Available' WHERE loc_id = ?", (oldest[1],))
+                    conn.commit(); conn.close(); st.balloons(); st.rerun()
             else:
-                st.warning(f"No {ship_prod} currently in stock.")
-                conn.close()
+                st.warning("No stock available."); conn.close()
 
-        # --- VISUAL GRID MAP ---
+        # --- GRID MAP & RECORDS (Same as v14.2) ---
         elif choice == "Stock Inquiry (Grid Map)":
+            # ... (Map logic from v14.2)
             st.title("🔎 Warehouse Visual Grid")
             conn = sqlite3.connect(DB_PATH)
-            loc_query = """
-                SELECT l.loc_id, l.status, t.product, t.bag_ref 
-                FROM locations l
-                LEFT JOIN test_results t ON l.loc_id = t.location_id AND t.status = 'Inventory'
-                ORDER BY l.loc_id ASC
-            """
-            df = pd.read_sql_query(loc_query, conn)
-            conn.close()
-
-            # Mapping for Heatmap: 0=Available (Green), 1=Revolution (Black), 2=Paris (Yellow)
+            loc_query = "SELECT l.loc_id, l.status, t.product, t.bag_ref FROM locations l LEFT JOIN test_results t ON l.loc_id = t.location_id AND t.status = 'Inventory' ORDER BY l.loc_id ASC"
+            df = pd.read_sql_query(loc_query, conn); conn.close()
             def map_color(row):
                 if row['status'] == 'Available': return 0
                 return 1 if row['product'] == 'Revolution CB' else 2
-
             df['color_val'] = df.apply(map_color, axis=1)
             z_data = df['color_val'].values.reshape(10, 10)
-            text_data = df.apply(lambda r: f"Loc: {r['loc_id']}<br>Prod: {r['product'] or 'Empty'}<br>ID: {r['bag_ref'] or ''}", axis=1).values.reshape(10, 10)
-
-            fig = go.Figure(data=go.Heatmap(
-                z=z_data, text=text_data, hoverinfo="text",
-                colorscale=[[0, '#28a745'], [0.5, '#000000'], [1, '#ffc107']],
-                showscale=False, xgap=5, ygap=5
-            ))
-            fig.update_layout(height=600, xaxis_visible=False, yaxis_visible=False, title="100-Slot Warehouse Map")
-            
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Available", len(df[df['status'] == 'Available']))
-            c2.metric("Revolution (Black)", len(df[df['product'] == 'Revolution CB']))
-            c3.metric("Paris (Yellow)", len(df[df['product'] == 'Paris CB']))
-            
+            text_data = df.apply(lambda r: f"Loc: {r['loc_id']}<br>Prod: {r['product'] or 'Empty'}", axis=1).values.reshape(10, 10)
+            fig = go.Figure(data=go.Heatmap(z=z_data, text=text_data, hoverinfo="text", colorscale=[[0,'#28a745'],[0.5,'#000000'],[1,'#ffc107']], showscale=False, xgap=5, ygap=5))
+            fig.update_layout(height=600, xaxis_visible=False, yaxis_visible=False)
             st.plotly_chart(fig, use_container_width=True)
 
         elif choice == "View Records":
@@ -183,6 +183,5 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 
 
