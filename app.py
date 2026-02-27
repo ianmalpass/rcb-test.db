@@ -43,17 +43,6 @@ def init_db():
                     bag_size_lbs REAL,
                     quantity INTEGER,
                     pallet_id TEXT)''')
-    # 4. Reactor Process Logs
-    c.execute('''CREATE TABLE IF NOT EXISTS process_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp DATETIME,
-                    operator TEXT,
-                    toluene_value INTEGER,
-                    feed_rate REAL,
-                    reactor_1_temp INTEGER,
-                    reactor_2_temp INTEGER,
-                    reactor_1_hz INTEGER,
-                    reactor_2_hz INTEGER)''')
     # Seed 100 Locations
     c.execute("SELECT COUNT(*) FROM locations")
     if c.fetchone()[0] == 0:
@@ -93,8 +82,13 @@ def main():
             if u.lower() in ["admin", "operator"]:
                 st.session_state.update({"logged_in": True, "user_display": u.capitalize()})
                 st.rerun()
+            else: st.error("Invalid credentials.")
     else:
         st.sidebar.title("AI-sistant")
+        if 'last_sack' in st.session_state:
+            if st.sidebar.button("🖨️ Reprint Last Label"):
+                st.session_state['show_label'] = True
+
         menu = ["Production Dashboard", "Production (Inventory)", "Shipping (FIFO)", "Stock Inquiry (Grid Map)", "View Records"]
         choice = st.sidebar.selectbox("Go to:", menu)
 
@@ -111,15 +105,14 @@ def main():
             ship_df = pd.read_sql_query(f"SELECT * FROM test_results WHERE status = 'Shipped' AND timestamp BETWEEN '{s_date}' AND '{e_date}'", conn)
             conn.close()
 
-            st.subheader("Inventory Metrics")
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Rev Sacks Made", len(bulk_df[bulk_df['product'] == 'Revolution CB']))
             c2.metric("Par Sacks Made", len(bulk_df[bulk_df['product'] == 'Paris CB']))
-            c3.metric("Total Sacks Shipped", len(ship_df))
-            c4.metric("Small Bags Filled", int(bag_df['quantity'].sum()) if not bag_df.empty else 0)
+            c3.metric("Total Shipped", len(ship_df))
+            c4.metric("Small Bags Produced", int(bag_df['quantity'].sum()) if not bag_df.empty else 0)
 
-            st.subheader("Quality Averages")
             if not bulk_df.empty:
+                st.divider()
                 q1, q2, q3 = st.columns(3)
                 q1.metric("Avg Toluene", f"{bulk_df['toluene'].mean():.2f}")
                 q2.metric("Avg Hardness", f"{bulk_df['pellet_hardness'].mean():.1f}")
@@ -189,19 +182,35 @@ def main():
             else:
                 st.warning("No stock available."); conn.close()
 
-        # --- 4. GRID MAP ---
+        # --- 4. STOCK INQUIRY (MAX CONTRAST GRID) ---
         elif choice == "Stock Inquiry (Grid Map)":
             st.title("🔎 Warehouse Visual Grid")
             conn = sqlite3.connect(DB_PATH)
             loc_query = "SELECT l.loc_id, l.status, t.product FROM locations l LEFT JOIN test_results t ON l.loc_id = t.location_id AND t.status = 'Inventory' ORDER BY l.loc_id ASC"
             df = pd.read_sql_query(loc_query, conn); conn.close()
+
             def map_color(row):
                 if row['status'] == 'Available': return 0
                 return 1 if row['product'] == 'Revolution CB' else 2
+
+            def map_text_color(row):
+                return 'black' if row['product'] == 'Paris CB' else 'white'
+
             df['color_val'] = df.apply(map_color, axis=1)
+            df['text_color'] = df.apply(map_text_color, axis=1)
+            df['display_num'] = df['loc_id'].str.extract('(\d+)')
+            
             z_data = df['color_val'].values.reshape(10, 10)
-            fig = go.Figure(data=go.Heatmap(z=z_data, colorscale=[[0,'#28a745'],[0.5,'#000000'],[1,'#ffc107']], showscale=False, xgap=5, ygap=5))
-            fig.update_layout(height=600, xaxis_visible=False, yaxis_visible=False)
+            number_labels = df['display_num'].values.reshape(10, 10)
+            text_colors = df['text_color'].values.reshape(10, 10)
+
+            fig = go.Figure(data=go.Heatmap(
+                z=z_data, text=number_labels, texttemplate="<b>%{text}</b>",
+                textfont={"size": 32, "family": "Arial Black", "color": text_colors.flatten().tolist()},
+                colorscale=[[0, '#28a745'], [0.5, '#000000'], [1, '#ffc107']],
+                showscale=False, xgap=8, ygap=8
+            ))
+            fig.update_layout(height=900, xaxis_visible=False, yaxis_visible=False, scaleanchor="x")
             st.plotly_chart(fig, use_container_width=True)
 
         # --- 5. VIEW RECORDS ---
