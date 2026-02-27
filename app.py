@@ -11,11 +11,10 @@ from io import BytesIO
 # --- CONFIGURATION ---
 DB_PATH = "rcb_inventory_v14.db"
 
-# --- DATABASE INITIALIZATION ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # 1. Main Production (Supersacks)
+    # Main Production Table
     c.execute('''CREATE TABLE IF NOT EXISTS test_results (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     bag_ref TEXT UNIQUE,
@@ -30,11 +29,11 @@ def init_db():
                     moisture REAL,
                     toluene INTEGER,
                     ash_content REAL)''')
-    # 2. Location Master (100 Slots)
+    # Location Master
     c.execute('''CREATE TABLE IF NOT EXISTS locations (
                     loc_id TEXT PRIMARY KEY,
                     status TEXT DEFAULT 'Available')''')
-    # 3. Small Bagging Operations
+    # Small Bagging Operations
     c.execute('''CREATE TABLE IF NOT EXISTS bagging_ops (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp DATETIME,
@@ -51,7 +50,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- HELPERS ---
 def generate_qr_base64(data):
     qr = qrcode.QRCode(version=1, box_size=10, border=2)
     qr.add_data(data)
@@ -67,7 +65,6 @@ def get_next_available_location():
     res = c.fetchone(); conn.close()
     return res[0] if res else None
 
-# --- MAIN APP ---
 def main():
     st.set_page_config(page_title="AI-sistant", layout="wide")
     init_db()
@@ -82,43 +79,29 @@ def main():
             if u.lower() in ["admin", "operator"]:
                 st.session_state.update({"logged_in": True, "user_display": u.capitalize()})
                 st.rerun()
-            else: st.error("Invalid credentials.")
     else:
         st.sidebar.title("AI-sistant")
-        if 'last_sack' in st.session_state:
-            if st.sidebar.button("🖨️ Reprint Last Label"):
-                st.session_state['show_label'] = True
-
         menu = ["Production Dashboard", "Production (Inventory)", "Shipping (FIFO)", "Stock Inquiry (Grid Map)", "View Records"]
         choice = st.sidebar.selectbox("Go to:", menu)
 
-        # --- 1. PRODUCTION DASHBOARD ---
+        # --- 1. DASHBOARD ---
         if choice == "Production Dashboard":
             st.title("📊 Production & Shipping Dashboard")
             d_start = st.sidebar.date_input("Start Date", value=date.today() - timedelta(days=30))
             d_end = st.sidebar.date_input("End Date", value=date.today())
             s_date, e_date = d_start.strftime("%Y-%m-%d 00:00:00"), d_end.strftime("%Y-%m-%d 23:59:59")
-
             conn = sqlite3.connect(DB_PATH)
             bulk_df = pd.read_sql_query(f"SELECT * FROM test_results WHERE timestamp BETWEEN '{s_date}' AND '{e_date}'", conn)
             bag_df = pd.read_sql_query(f"SELECT * FROM bagging_ops WHERE timestamp BETWEEN '{s_date}' AND '{e_date}'", conn)
             ship_df = pd.read_sql_query(f"SELECT * FROM test_results WHERE status = 'Shipped' AND timestamp BETWEEN '{s_date}' AND '{e_date}'", conn)
             conn.close()
-
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Rev Sacks Made", len(bulk_df[bulk_df['product'] == 'Revolution CB']))
             c2.metric("Par Sacks Made", len(bulk_df[bulk_df['product'] == 'Paris CB']))
             c3.metric("Total Shipped", len(ship_df))
             c4.metric("Small Bags Produced", int(bag_df['quantity'].sum()) if not bag_df.empty else 0)
 
-            if not bulk_df.empty:
-                st.divider()
-                q1, q2, q3 = st.columns(3)
-                q1.metric("Avg Toluene", f"{bulk_df['toluene'].mean():.2f}")
-                q2.metric("Avg Hardness", f"{bulk_df['pellet_hardness'].mean():.1f}")
-                q3.metric("Avg Moisture", f"{bulk_df['moisture'].mean():.2f}%")
-
-        # --- 2. PRODUCTION (INVENTORY) ---
+        # --- 2. PRODUCTION ---
         elif choice == "Production (Inventory)":
             st.title("🏗️ Bulk Production")
             next_loc = get_next_available_location()
@@ -136,17 +119,22 @@ def main():
                         moist = st.number_input("Moisture %", format="%.2f")
                         tol = st.number_input("Toluene", step=1)
                         ash = st.number_input("Ash %", format="%.1f")
-                    
                     if st.form_submit_button("Record & Generate Label"):
+                        # Added seconds to bag_id to fix IntegrityError
                         bag_id = f"RCB-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
                         conn = sqlite3.connect(DB_PATH); c = conn.cursor()
-                        c.execute("INSERT INTO test_results (bag_ref, timestamp, operator, product, location_id, weight_lbs, pellet_hardness, moisture, toluene, ash_content) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                                  (bag_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), st.session_state['user_display'], prod, next_loc, weight, hard, moist, tol, ash))
-                        c.execute("UPDATE locations SET status = 'Occupied' WHERE loc_id = ?", (next_loc,))
-                        conn.commit(); conn.close()
-                        st.session_state['last_sack'] = {"id": bag_id, "prod": prod, "loc": next_loc, "weight": weight, "ash": ash, "hard": hard, "moist": moist}
-                        st.session_state['show_label'] = True
-                        st.rerun()
+                        try:
+                            c.execute("INSERT INTO test_results (bag_ref, timestamp, operator, product, location_id, weight_lbs, pellet_hardness, moisture, toluene, ash_content) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                                      (bag_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), st.session_state['user_display'], prod, next_loc, weight, hard, moist, tol, ash))
+                            c.execute("UPDATE locations SET status = 'Occupied' WHERE loc_id = ?", (next_loc,))
+                            conn.commit()
+                            st.session_state['last_sack'] = {"id": bag_id, "prod": prod, "loc": next_loc, "weight": weight, "ash": ash, "hard": hard, "moist": moist}
+                            st.session_state['show_label'] = True
+                            st.rerun()
+                        except sqlite3.IntegrityError:
+                            st.error("Submission conflict. Please wait 1 second and try again.")
+                        finally:
+                            conn.close()
 
             if st.session_state.get('show_label') and 'last_sack' in st.session_state:
                 ls = st.session_state['last_sack']
@@ -166,7 +154,7 @@ def main():
                 """
                 st.components.v1.html(label_html, height=950)
 
-        # --- 3. SHIPPING (FIFO) ---
+        # --- 3. SHIPPING ---
         elif choice == "Shipping (FIFO)":
             st.title("🚢 Auto-Dispatch (FIFO)")
             ship_prod = st.selectbox("Product to Ship", ["Revolution CB", "Paris CB"])
@@ -182,31 +170,23 @@ def main():
             else:
                 st.warning("No stock available."); conn.close()
 
-        # --- 4. STOCK INQUIRY (MAX CONTRAST GRID) ---
+        # --- 4. GRID MAP (FIXED CONTRAST LOGIC) ---
         elif choice == "Stock Inquiry (Grid Map)":
             st.title("🔎 Warehouse Visual Grid")
             conn = sqlite3.connect(DB_PATH)
             loc_query = "SELECT l.loc_id, l.status, t.product FROM locations l LEFT JOIN test_results t ON l.loc_id = t.location_id AND t.status = 'Inventory' ORDER BY l.loc_id ASC"
             df = pd.read_sql_query(loc_query, conn); conn.close()
-
-            def map_color(row):
-                if row['status'] == 'Available': return 0
-                return 1 if row['product'] == 'Revolution CB' else 2
-
-            def map_text_color(row):
-                return 'black' if row['product'] == 'Paris CB' else 'white'
-
-            df['color_val'] = df.apply(map_color, axis=1)
-            df['text_color'] = df.apply(map_text_color, axis=1)
+            df['color_val'] = df.apply(lambda r: 0 if r['status'] == 'Available' else (1 if r['product'] == 'Revolution CB' else 2), axis=1)
+            df['t_color'] = df['product'].apply(lambda p: 'black' if p == 'Paris CB' else 'white')
             df['display_num'] = df['loc_id'].str.extract('(\d+)')
             
             z_data = df['color_val'].values.reshape(10, 10)
             number_labels = df['display_num'].values.reshape(10, 10)
-            text_colors = df['text_color'].values.reshape(10, 10)
-
+            
+            # Corrected textfont color mapping for Plotly Heatmap
             fig = go.Figure(data=go.Heatmap(
                 z=z_data, text=number_labels, texttemplate="<b>%{text}</b>",
-                textfont={"size": 32, "family": "Arial Black", "color": text_colors.flatten().tolist()},
+                textfont={"size": 32, "family": "Arial Black", "color": df['t_color'].tolist()},
                 colorscale=[[0, '#28a745'], [0.5, '#000000'], [1, '#ffc107']],
                 showscale=False, xgap=8, ygap=8
             ))
