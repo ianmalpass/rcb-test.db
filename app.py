@@ -5,8 +5,7 @@ from datetime import datetime, date
 import hashlib
 import shutil
 import os
-import barcode
-from barcode.writer import ImageWriter
+import qrcode
 import base64
 from io import BytesIO
 import plotly.express as px
@@ -16,11 +15,13 @@ import plotly.graph_objects as go
 DB_PATH = "rcb_inventory_v13.db"
 BACKUP_DIR = "backups"
 
+# --- DATABASE INITIALIZATION ---
 def init_db():
-    if not os.path.exists(BACKUP_DIR): os.makedirs(BACKUP_DIR)
+    if not os.path.exists(BACKUP_DIR):
+        os.makedirs(BACKUP_DIR)
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # Table 1: Quality & Inventory (Added Location)
+    # Main Production Table
     c.execute('''CREATE TABLE IF NOT EXISTS test_results (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     bag_ref TEXT UNIQUE,
@@ -28,7 +29,7 @@ def init_db():
                     operator TEXT,
                     shipped_by TEXT,
                     product TEXT,
-                    location TEXT DEFAULT 'Warehouse',
+                    location TEXT DEFAULT 'WH-1',
                     customer_name TEXT DEFAULT 'In Inventory',
                     shipped_date TEXT DEFAULT 'Not Shipped',
                     status TEXT DEFAULT 'Inventory',
@@ -37,8 +38,18 @@ def init_db():
                     toluene INTEGER,
                     ash_content REAL,
                     weight_lbs REAL)''')
-    
-    # Table 2: Bagging Operations (New Section)
+    # Reactor Table
+    c.execute('''CREATE TABLE IF NOT EXISTS process_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp DATETIME,
+                    operator TEXT,
+                    toluene_value INTEGER,
+                    feed_rate REAL,
+                    reactor_1_temp INTEGER,
+                    reactor_2_temp INTEGER,
+                    reactor_1_hz INTEGER,
+                    reactor_2_hz INTEGER)''')
+    # Bagging Operation Table
     c.execute('''CREATE TABLE IF NOT EXISTS bagging_ops (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp DATETIME,
@@ -47,22 +58,24 @@ def init_db():
                     bag_size_lbs REAL,
                     quantity INTEGER,
                     pallet_id TEXT)''')
-
-    c.execute('''CREATE TABLE IF NOT EXISTS process_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp DATETIME, operator TEXT, toluene_value INTEGER,
-                    feed_rate REAL, reactor_1_temp INTEGER, reactor_2_temp INTEGER,
-                    reactor_1_hz INTEGER, reactor_2_hz INTEGER)''')
+    # User Table
     c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT, full_name TEXT)''')
+    
+    c.execute("SELECT COUNT(*) FROM users")
+    if c.fetchone()[0] == 0:
+        admin_pass = hashlib.sha256(str.encode('admin123')).hexdigest()
+        c.execute("INSERT INTO users VALUES (?, ?, ?)", ('admin', admin_pass, 'System Admin'))
     conn.commit()
     conn.close()
 
 # --- HELPERS ---
-def generate_barcode_base64(data):
-    CODE128 = barcode.get_barcode_class('code128')
-    barcode_obj = CODE128(data, writer=ImageWriter())
+def generate_qr_base64(data):
+    qr = qrcode.QRCode(version=1, box_size=10, border=2)
+    qr.add_data(data)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
     buffered = BytesIO()
-    barcode_obj.write(buffered)
+    img.save(buffered, format="PNG")
     return base64.b64encode(buffered.getvalue()).decode()
 
 def check_login(username, password):
@@ -74,115 +87,162 @@ def check_login(username, password):
     conn.close()
     return result[0] if result else None
 
+def generate_bag_ref():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM test_results")
+    count = c.fetchone()[0]
+    conn.close()
+    return f"RCB-{datetime.now().year}-{(count + 1):04d}"
+
 # --- MAIN APP ---
 def main():
-    st.set_page_config(page_title="AI-sistant - Plant Management", layout="wide")
+    st.set_page_config(page_title="AI-sistant", layout="wide")
     init_db()
 
-    if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
+    if 'logged_in' not in st.session_state: 
+        st.session_state['logged_in'] = False
 
     if not st.session_state['logged_in']:
-        st.title("🔒 AI-sistant Portal Login")
-        u, p = st.text_input("Username"), st.text_input("Password", type='password')
+        st.title("🔒 AI-sistant Login")
+        u = st.text_input("Username")
+        p = st.text_input("Password", type='password')
         if st.button("Login"):
             fn = check_login(u, p)
             if fn or (u == "admin" and p == "admin123"):
-                st.session_state.update({"logged_in": True, "user_display": fn or "Admin", "username": u})
+                st.session_state.update({"logged_in": True, "user_display": fn or "System Admin", "username": u})
                 st.rerun()
+            else: st.error("Invalid credentials.")
     else:
         st.sidebar.title("AI-sistant")
-        menu = ["Production (Inventory)", "Reactor Logs", "Bagging Room", "Shipping", "Analytics Dashboard", "Stock Inquiry", "View Records"]
+        st.sidebar.info(f"User: {st.session_state['user_display']}")
+        menu = ["Production (Inventory)", "Reactor Logs", "Bagging Room", "Shipping", "Analytics Dashboard", "Stock Inquiry", "View Records", "Help & Documentation"]
         if st.session_state['username'] == 'admin': menu.append("User Management")
         choice = st.sidebar.selectbox("Go to:", menu)
+        
+        if st.sidebar.button("Logout"):
+            st.session_state['logged_in'] = False
+            st.rerun()
 
-        # --- PRODUCTION (Added Location) ---
+        # --- PRODUCTION ---
         if choice == "Production (Inventory)":
             st.title("🏗️ Bulk Production (Supersacks)")
-            conn = sqlite3.connect(DB_PATH); c = conn.cursor()
-            c.execute("SELECT COUNT(*) FROM test_results"); count = c.fetchone()[0]; conn.close()
-            bag_id = f"RCB-{datetime.now().year}-{(count + 1):04d}"
-            
+            bag_id = generate_bag_ref()
             with st.form("prod_form", clear_on_submit=True):
-                st.subheader(f"New Supersack ID: {bag_id}")
-                product = st.selectbox("Product", ["Revolution CB", "Paris CB"])
-                location = st.text_input("Warehouse Location", placeholder="e.g., A-104")
+                st.subheader(f"New Sack ID: {bag_id}")
+                prod = st.selectbox("Product", ["Revolution CB", "Paris CB"])
+                loc = st.text_input("Location", value="WH-1")
                 c1, c2 = st.columns(2)
                 with c1:
-                    hardness = st.number_input("Hardness", min_value=0, step=1)
-                    weight = st.number_input("Bulk Weight (lbs)", value=2000.0)
+                    hard = st.number_input("Hardness", min_value=0, step=1)
+                    weight = st.number_input("Weight (lbs)", value=2000.0)
                 with c2:
-                    moisture = st.number_input("Moisture %", format="%.2f")
-                    toluene = st.number_input("Toluene", step=1)
+                    moist = st.number_input("Moisture %", format="%.2f")
+                    tol = st.number_input("Toluene", step=1)
                     ash = st.number_input("Ash Content %", format="%.1f")
                 
-                if st.form_submit_button("Record Supersack"):
+                if st.form_submit_button("Record & Generate QR"):
                     conn = sqlite3.connect(DB_PATH); c = conn.cursor()
                     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     c.execute('''INSERT INTO test_results (bag_ref, timestamp, operator, product, location, pellet_hardness, moisture, toluene, ash_content, weight_lbs)
-                                 VALUES (?,?,?,?,?,?,?,?,?,?)''', (bag_id, ts, st.session_state['user_display'], product, location, hardness, moisture, toluene, ash, weight))
+                                 VALUES (?,?,?,?,?,?,?,?,?,?)''', (bag_id, ts, st.session_state['user_display'], prod, loc, hard, moist, tol, ash, weight))
                     conn.commit(); conn.close()
-                    st.session_state['last_sack'] = {"id": bag_id, "prod": product, "loc": location, "weight": weight}
-                    st.success(f"Recorded Sack {bag_id} at {location}")
+                    st.session_state['last_sack'] = {"id": bag_id, "prod": prod, "loc": loc, "weight": weight, "ash": ash, "hard": hard, "ts": ts}
 
-        # --- BAGGING ROOM (NEW SECTION) ---
-        elif choice == "Bagging Room":
-            st.title("🛍️ Small Bagging Operation")
-            st.info("Use this page to record small bags filled from bulk supersacks.")
-            
-            with st.form("bagging_form", clear_on_submit=True):
-                prod = st.selectbox("Product Being Bagged", ["Revolution CB", "Paris CB"])
-                bag_size = st.number_input("Bag Size (lbs)", min_value=1.0, value=50.0)
-                qty = st.number_input("Number of Bags Filled (Qty)", min_value=1, step=1)
-                pallet_id = f"PAL-{datetime.now().strftime('%m%d%y-%H%M')}"
-                
-                if st.form_submit_button("Submit Bagging Run & Print Pallet Label"):
+            if 'last_sack' in st.session_state:
+                ls = st.session_state['last_sack']
+                qr_code = generate_qr_base64(ls['id'])
+                label_html = f"""
+                <div id="print-area" style="width: 100%; max-width: 800px; padding: 40px; border: 12px solid black; font-family: Arial, sans-serif; background: white; color: black; margin: auto; text-align: center;">
+                    <div style="font-size: 80px; font-weight: 900; border-bottom: 8px solid black;">{ls['prod']}</div>
+                    <div style="padding: 30px 0;"><img src="data:image/png;base64,{qr_code}" style="width: 400px;"><br><div style="font-size: 50px; font-weight: bold;">{ls['id']}</div></div>
+                    <div style="font-size: 40px; border-top: 8px solid black; padding-top: 20px; text-align: left;">
+                        <b>LOC:</b> {ls['loc']} | <b>WT:</b> {ls['weight']:.1f} lbs<br><b>ASH:</b> {ls['ash']:.1f}% | <b>HARD:</b> {int(ls['hard'])}
+                    </div>
+                </div><br><div style="text-align:center;"><button onclick="window.print()" style="padding: 20px 40px; background: #28a745; color: white; border: none; font-size: 24px; cursor: pointer;">🖨️ PRINT FULL LETTER LABEL</button></div>
+                <style>@media print {{ body * {{ visibility: hidden; }} #print-area, #print-area * {{ visibility: visible; }} #print-area {{ position: absolute; left: 0; top: 0; width: 100%; }} }}</style>
+                """
+                st.components.v1.html(label_html, height=1000)
+
+        # --- REACTOR LOGS ---
+        elif choice == "Reactor Logs":
+            st.title("🔥 Reactor Process Parameters")
+            with st.form("r_form", clear_on_submit=True):
+                c1, c2 = st.columns(2)
+                with c1:
+                    tol_v = st.number_input("Toluene Value", step=1)
+                    feed = st.number_input("Feed Rate", format="%.2f")
+                    h1, h2 = st.number_input("R1 Hz", value=60), st.number_input("R2 Hz", value=45)
+                with c2:
+                    t1, t2 = st.number_input("R1 Temp (°C)", value=500), st.number_input("R2 Temp (°C)", value=550)
+                if st.form_submit_button("Submit Log"):
                     conn = sqlite3.connect(DB_PATH); c = conn.cursor()
                     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    c.execute("INSERT INTO bagging_ops (timestamp, operator, product, bag_size_lbs, quantity, pallet_id) VALUES (?,?,?,?,?,?)",
-                              (ts, st.session_state['user_display'], prod, bag_size, qty, pallet_id))
-                    conn.commit(); conn.close()
-                    
-                    st.success(f"Pallet {pallet_id} Recorded!")
-                    
-                    # Pallet Label HTML
-                    st.divider()
-                    label_html = f"""
-                    <div id="pallet-label" style="width:400px; padding:20px; border:5px solid black; font-family:Arial; background:white; color:black; text-align:center;">
-                        <h1 style="margin:0; font-size:40px;">{prod}</h1>
-                        <hr style="border:2px solid black;">
-                        <h2 style="font-size:30px; margin:10px 0;">PALLET ID: {pallet_id}</h2>
-                        <div style="font-size:24px; text-align:left; margin-left:40px;">
-                            <strong>Bag Size:</strong> {bag_size} lbs<br>
-                            <strong>Quantity:</strong> {qty} Bags<br>
-                            <strong>Total Weight:</strong> {bag_size * qty} lbs
-                        </div>
-                        <div style="margin-top:20px; font-size:12px; color:gray;">Date: {ts} | Operator: {st.session_state['user_display']}</div>
-                    </div>
-                    <br><button onclick="window.print()" style="padding:15px; background:#007bff; color:white; border:none; width:400px; cursor:pointer; font-weight:bold; font-size:18px;">🖨️ Print Pallet Label</button>
-                    <style>@media print {{ body * {{ visibility: hidden; }} #pallet-label, #pallet-label * {{ visibility: visible; }} #pallet-label {{ position: absolute; left: 0; top: 0; }} }}</style>
-                    """
-                    st.components.v1.html(label_html, height=500)
+                    c.execute("INSERT INTO process_logs (timestamp, operator, toluene_value, feed_rate, reactor_1_temp, reactor_2_temp, reactor_1_hz, reactor_2_hz) VALUES (?,?,?,?,?,?,?,?)", (ts, st.session_state['user_display'], tol_v, feed, t1, t2, h1, h2))
+                    conn.commit(); conn.close(); st.success("Process Log Saved.")
 
-        # --- SHIPPING (Updated for Location) ---
+        # --- BAGGING ROOM ---
+        elif choice == "Bagging Room":
+            st.title("🛍️ Small Bagging Operation")
+            with st.form("b_form", clear_on_submit=True):
+                prod = st.selectbox("Product", ["Revolution CB", "Paris CB"])
+                size = st.number_input("Bag Size (lbs)", value=50.0)
+                qty = st.number_input("Number of Bags", min_value=1, step=1)
+                pal_id = f"PAL-{datetime.now().strftime('%m%d%y-%H%M')}"
+                if st.form_submit_button("Record Run & Print Label"):
+                    conn = sqlite3.connect(DB_PATH); c = conn.cursor()
+                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    c.execute("INSERT INTO bagging_ops (timestamp, operator, product, bag_size_lbs, quantity, pallet_id) VALUES (?,?,?,?,?,?)", (ts, st.session_state['user_display'], prod, size, qty, pal_id))
+                    conn.commit(); conn.close()
+                    st.session_state['last_pal'] = {"id": pal_id, "prod": prod, "size": size, "qty": qty, "ts": ts}
+
+            if 'last_pal' in st.session_state:
+                lp = st.session_state['last_pal']
+                label_html = f"""<div id="p-area" style="width:100%; max-width:800px; padding:40px; border:12px solid black; font-family:Arial; background:white; color:black; text-align:center; margin:auto;">
+                    <div style="font-size:90px; font-weight:900;">{lp['prod']}</div><hr style="border:5px solid black;">
+                    <div style="font-size:50px; margin:20px 0;">PALLET ID: <b>{lp['id']}</b></div>
+                    <div style="font-size:45px; text-align:left; padding-left:50px; line-height:1.8;">
+                        <b>BAG SIZE:</b> {lp['size']} lbs<br><b>QUANTITY:</b> {lp['qty']} Bags<br><b>NET WT:</b> {lp['size']*lp['qty']:.1f} lbs
+                    </div></div><br><div style="text-align:center;"><button onclick="window.print()" style="padding:20px 40px; background:#007bff; color:white; border:none; font-size:24px; cursor:pointer;">🖨️ PRINT PALLET LABEL</button></div>
+                    <style>@media print {{ body * {{ visibility: hidden; }} #p-area, #p-area * {{ visibility: visible; }} #p-area {{ position: absolute; left: 0; top: 0; width:100%; }} }}</style>"""
+                st.components.v1.html(label_html, height=900)
+
+        # --- SHIPPING ---
         elif choice == "Shipping":
-            st.title("🚢 Dispatch / Bagging Transfer")
-            sid = st.text_input("Scan Supersack Barcode").upper()
+            st.title("🚢 Dispatch / Transfer")
+            sid = st.text_input("Scan QR Code or Type ID").upper()
             if sid:
                 conn = sqlite3.connect(DB_PATH)
                 res = pd.read_sql_query("SELECT * FROM test_results WHERE bag_ref = ? AND status = 'Inventory'", conn, params=(sid,))
                 if not res.empty:
                     st.warning(f"Sack located at: **{res['location'].values[0]}**")
-                    with st.form("ship"):
-                        cust = st.text_input("Customer Name", help="Type 'Bagging Operation' if moving to small bags.")
-                        if st.form_submit_button("Ship / Move"):
+                    with st.form("s_form"):
+                        cust = st.text_input("Customer / Operation")
+                        if st.form_submit_button("Ship/Move"):
                             c = conn.cursor(); sd = date.today().strftime("%Y-%m-%d")
                             c.execute("UPDATE test_results SET customer_name=?, shipped_date=?, status='Shipped', shipped_by=? WHERE bag_ref=?", (cust, sd, st.session_state['user_display'], sid))
-                            conn.commit(); conn.close(); st.success(f"Sack {sid} moved to {cust}"); st.rerun()
+                            conn.commit(); conn.close(); st.success(f"Moved {sid} to {cust}"); st.rerun()
                 else: st.error("Sack not found."); conn.close()
 
-        # --- STOCK INQUIRY (Updated for Location) ---
+        # --- ANALYTICS ---
+        elif choice == "Analytics Dashboard":
+            st.title("📈 Plant Trends")
+            conn = sqlite3.connect(DB_PATH)
+            p_df = pd.read_sql_query("SELECT * FROM process_logs ORDER BY timestamp ASC", conn)
+            conn.close()
+            if not p_df.empty:
+                p_df['timestamp'] = pd.to_datetime(p_df['timestamp'])
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=p_df['timestamp'], y=p_df['reactor_1_temp'], name="R1 Temp", line=dict(color='red')))
+                fig.add_trace(go.Scatter(x=p_df['timestamp'], y=p_df['reactor_2_temp'], name="R2 Temp", line=dict(color='blue')))
+                fig.add_hline(y=500, line_dash="dash", line_color="red")
+                fig.add_hline(y=550, line_dash="dash", line_color="blue")
+                st.plotly_chart(fig, use_container_width=True)
+            else: st.info("No data yet.")
+
+        # --- STOCK INQUIRY ---
         elif choice == "Stock Inquiry":
-            st.title("🔎 Inventory Enquiry")
+            st.title("🔎 Inventory Stock")
             conn = sqlite3.connect(DB_PATH)
             df = pd.read_sql_query("SELECT bag_ref, product, location, weight_lbs, timestamp FROM test_results WHERE status = 'Inventory'", conn)
             conn.close()
@@ -190,8 +250,8 @@ def main():
 
         # --- VIEW RECORDS ---
         elif choice == "View Records":
-            st.title("📊 Plant Archives")
-            t1, t2, t3 = st.tabs(["Supersacks", "Small Bagging Runs", "Reactor Logs"])
+            st.title("📊 Plant Records")
+            t1, t2, t3 = st.tabs(["Supersacks", "Bagging runs", "Reactor"])
             conn = sqlite3.connect(DB_PATH)
             with t1: st.dataframe(pd.read_sql_query("SELECT * FROM test_results", conn))
             with t2: st.dataframe(pd.read_sql_query("SELECT * FROM bagging_ops", conn))
