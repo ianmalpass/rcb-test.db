@@ -11,7 +11,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 # --- CONFIGURATION ---
-DB_PATH = "rcb_inventory_v13.db"
+DB_PATH = "rcb_inventory_v12.db"
 BACKUP_DIR = "backups"
 
 # --- DATABASE INITIALIZATION ---
@@ -204,4 +204,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
