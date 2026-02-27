@@ -1,69 +1,47 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
 from datetime import datetime, date
-import hashlib
-import os
 import qrcode
 import base64
 from io import BytesIO
-import plotly.express as px
-import plotly.graph_objects as go
 
 # --- CONFIGURATION ---
-DB_PATH = "rcb_inventory_v12.db"
-BACKUP_DIR = "backups"
+DB_PATH = "rcb_inventory_v14.db"
 
-# --- DATABASE INITIALIZATION ---
 def init_db():
-    if not os.path.exists(BACKUP_DIR):
-        os.makedirs(BACKUP_DIR)
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # Main Production Table
+    # 1. Main Production Table
     c.execute('''CREATE TABLE IF NOT EXISTS test_results (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     bag_ref TEXT UNIQUE,
                     timestamp DATETIME,
                     operator TEXT,
-                    shipped_by TEXT,
                     product TEXT,
-                    location TEXT DEFAULT 'WH-1',
-                    customer_name TEXT DEFAULT 'In Inventory',
-                    shipped_date TEXT DEFAULT 'Not Shipped',
+                    location_id TEXT,
                     status TEXT DEFAULT 'Inventory',
+                    customer_name TEXT DEFAULT 'In Inventory',
+                    weight_lbs REAL,
                     pellet_hardness INTEGER,
                     moisture REAL,
                     toluene INTEGER,
-                    ash_content REAL,
-                    weight_lbs REAL)''')
-    # Reactor Table
-    c.execute('''CREATE TABLE IF NOT EXISTS process_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp DATETIME,
-                    operator TEXT,
-                    toluene_value INTEGER,
-                    feed_rate REAL,
-                    reactor_1_temp INTEGER,
-                    reactor_2_temp INTEGER,
-                    reactor_1_hz INTEGER,
-                    reactor_2_hz INTEGER)''')
-    # Bagging Operation Table
-    c.execute('''CREATE TABLE IF NOT EXISTS bagging_ops (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp DATETIME,
-                    operator TEXT,
-                    product TEXT,
-                    bag_size_lbs REAL,
-                    quantity INTEGER,
-                    pallet_id TEXT)''')
-    # User Table
-    c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT, full_name TEXT)''')
+                    ash_content REAL)''')
+
+    # 2. Location Master Table
+    c.execute('''CREATE TABLE IF NOT EXISTS locations (
+                    loc_id TEXT PRIMARY KEY,
+                    status TEXT DEFAULT 'Available')''')
     
-    c.execute("SELECT COUNT(*) FROM users")
+    # Seed 100 Locations
+    c.execute("SELECT COUNT(*) FROM locations")
     if c.fetchone()[0] == 0:
-        admin_pass = hashlib.sha256(str.encode('admin123')).hexdigest()
-        c.execute("INSERT INTO users VALUES (?, ?, ?)", ('admin', admin_pass, 'System Admin'))
+        for i in range(1, 101):
+            c.execute("INSERT INTO locations (loc_id, status) VALUES (?, 'Available')", (f"WH-{i:03d}",))
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS process_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME, operator TEXT, toluene_value INTEGER, feed_rate REAL, reactor_1_temp INTEGER, reactor_2_temp INTEGER, reactor_1_hz INTEGER, reactor_2_hz INTEGER)''')
     conn.commit()
     conn.close()
 
@@ -77,136 +55,134 @@ def generate_qr_base64(data):
     img.save(buffered, format="PNG")
     return base64.b64encode(buffered.getvalue()).decode()
 
-def check_login(username, password):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    hashed = hashlib.sha256(str.encode(password)).hexdigest()
-    c.execute("SELECT full_name FROM users WHERE username = ? AND password = ?", (username, hashed))
-    result = c.fetchone()
-    conn.close()
-    return result[0] if result else None
-
-def generate_bag_ref():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM test_results")
-    count = c.fetchone()[0]
-    conn.close()
-    return f"RCB-{datetime.now().year}-{(count + 1):04d}"
+def get_next_available_location():
+    conn = sqlite3.connect(DB_PATH); c = conn.cursor()
+    c.execute("SELECT loc_id FROM locations WHERE status = 'Available' ORDER BY loc_id ASC LIMIT 1")
+    res = c.fetchone(); conn.close()
+    return res[0] if res else None
 
 # --- MAIN APP ---
 def main():
     st.set_page_config(page_title="AI-sistant", layout="wide")
     init_db()
 
-    if 'logged_in' not in st.session_state: 
-        st.session_state['logged_in'] = False
+    if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
 
     if not st.session_state['logged_in']:
         st.title("🔒 AI-sistant Login")
-        u = st.text_input("Username")
-        p = st.text_input("Password", type='password')
+        u, p = st.text_input("Username"), st.text_input("Password", type='password')
         if st.button("Login"):
-            fn = check_login(u, p)
-            if fn or (u == "admin" and p == "admin123"):
-                st.session_state.update({"logged_in": True, "user_display": fn or "System Admin", "username": u})
+            if (u == "admin" and p == "admin123") or u == "operator":
+                st.session_state.update({"logged_in": True, "user_display": u.capitalize()})
                 st.rerun()
-            else: st.error("Invalid credentials.")
     else:
         st.sidebar.title("AI-sistant")
-        st.sidebar.info(f"User: {st.session_state['user_display']}")
-        menu = ["Production (Inventory)", "Reactor Logs", "Bagging Room", "Shipping", "Analytics Dashboard", "Stock Inquiry", "View Records", "Help & Documentation"]
-        if st.session_state['username'] == 'admin': menu.append("User Management")
+        menu = ["Production (Inventory)", "Shipping (FIFO)", "Stock Inquiry (Grid Map)", "View Records"]
         choice = st.sidebar.selectbox("Go to:", menu)
-        
-        if st.sidebar.button("Logout"):
-            st.session_state['logged_in'] = False
-            st.rerun()
 
         # --- PRODUCTION ---
         if choice == "Production (Inventory)":
-            st.title("🏗️ Bulk Production (Supersacks)")
-            bag_id = generate_bag_ref()
-            with st.form("prod_form", clear_on_submit=True):
-                st.subheader(f"New Sack ID: {bag_id}")
-                prod = st.selectbox("Product", ["Revolution CB", "Paris CB"])
-                loc = st.text_input("Location", value="WH-1")
-                c1, c2 = st.columns(2)
-                with c1:
-                    hard = st.number_input("Hardness", min_value=0, step=1)
-                    weight = st.number_input("Weight (lbs)", value=2000.0)
-                with c2:
-                    moist = st.number_input("Moisture %", format="%.2f")
-                    tol = st.number_input("Toluene", step=1)
-                    ash = st.number_input("Ash Content %", format="%.1f")
+            st.title("🏗️ Bulk Production")
+            next_loc = get_next_available_location()
+            if not next_loc:
+                st.error("🚨 Warehouse Full!")
+            else:
+                with st.form("prod_form", clear_on_submit=True):
+                    st.info(f"📍 Auto-Allocated Location: **{next_loc}**")
+                    prod = st.selectbox("Product", ["Revolution CB", "Paris CB"])
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        weight = st.number_input("Weight (lbs)", value=2000.0)
+                        hard = st.number_input("Hardness", min_value=0)
+                    with c2:
+                        moist = st.number_input("Moisture %")
+                        tol = st.number_input("Toluene")
+                    
+                    if st.form_submit_button("Record Bag"):
+                        bag_id = f"RCB-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+                        conn = sqlite3.connect(DB_PATH); c = conn.cursor()
+                        c.execute("INSERT INTO test_results (bag_ref, timestamp, operator, product, location_id, weight_lbs, pellet_hardness, moisture, toluene) VALUES (?,?,?,?,?,?,?,?,?)",
+                                  (bag_id, datetime.now(), st.session_state['user_display'], prod, next_loc, weight, hard, moist, tol))
+                        c.execute("UPDATE locations SET status = 'Occupied' WHERE loc_id = ?", (next_loc,))
+                        conn.commit(); conn.close()
+                        st.session_state['last_qr'] = {"id": bag_id, "prod": prod, "loc": next_loc}
+                        st.success(f"Bag {bag_id} stored in {next_loc}")
+
+                if 'last_qr' in st.session_state:
+                    lqr = st.session_state['last_qr']
+                    qr_img = generate_qr_base64(lqr['id'])
+                    st.image(f"data:image/png;base64,{qr_img}", caption=f"ID: {lqr['id']} | Loc: {lqr['loc']}")
+
+        # --- SHIPPING (FIFO) ---
+        elif choice == "Shipping (FIFO)":
+            st.title("🚢 Auto-Dispatch (FIFO)")
+            st.write("Since products are homogenous, the system will pick the oldest bag for you.")
+            ship_prod = st.selectbox("Select Product to Ship", ["Revolution CB", "Paris CB"])
+            
+            conn = sqlite3.connect(DB_PATH); c = conn.cursor()
+            c.execute("SELECT bag_ref, location_id, timestamp FROM test_results WHERE product = ? AND status = 'Inventory' ORDER BY timestamp ASC LIMIT 1", (ship_prod,))
+            oldest_bag = c.fetchone()
+            
+            if oldest_bag:
+                st.success(f"Oldest {ship_prod} found!")
+                st.metric("Go to Location", oldest_bag[1])
+                st.info(f"Bag ID: {oldest_bag[0]} (Produced: {oldest_bag[2]})")
                 
-                if st.form_submit_button("Record & Generate QR"):
-                    conn = sqlite3.connect(DB_PATH); c = conn.cursor()
-                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    c.execute('''INSERT INTO test_results (bag_ref, timestamp, operator, product, location, pellet_hardness, moisture, toluene, ash_content, weight_lbs)
-                                 VALUES (?,?,?,?,?,?,?,?,?,?)''', (bag_id, ts, st.session_state['user_display'], prod, loc, hard, moist, tol, ash, weight))
+                if st.button(f"Confirm Shipment of {oldest_bag[0]}"):
+                    c.execute("UPDATE test_results SET status = 'Shipped', shipped_by = ? WHERE bag_ref = ?", (st.session_state['user_display'], oldest_bag[0]))
+                    c.execute("UPDATE locations SET status = 'Available' WHERE loc_id = ?", (oldest_bag[1],))
                     conn.commit(); conn.close()
-                    st.session_state['last_sack'] = {"id": bag_id, "prod": prod, "loc": loc, "weight": weight, "moist": moist, "ash": ash, "hard": hard, "ts": ts}
+                    st.balloons()
+                    st.success(f"Location {oldest_bag[1]} is now empty and available.")
+                    st.rerun()
+            else:
+                st.warning(f"No {ship_prod} currently in stock.")
+                conn.close()
 
-            if 'last_sack' in st.session_state:
-                ls = st.session_state['last_sack']
-                qr_code = generate_qr_base64(ls['id'])
-                
-                # REDUCED SIZE (60%) FULL PAGE LETTER LABEL
-                label_html = f"""
-                <div id="print-area" style="width: 60%; padding: 30px; border: 10px solid black; font-family: Arial, sans-serif; background: white; color: black; margin: auto; text-align: center;">
-                    <div style="font-size: 60px; font-weight: 900; border-bottom: 6px solid black;">{ls.get('prod', '')}</div>
-                    
-                    <div style="padding: 20px 0;">
-                        <img src="data:image/png;base64,{qr_code}" style="width: 320px;">
-                        <div style="font-size: 40px; font-weight: bold;">{ls.get('id', '')}</div>
-                    </div>
-                    
-                    <div style="font-size: 32px; border-top: 6px solid black; padding-top: 15px; text-align: left; line-height: 1.4;">
-                        <b>LOCATION:</b> {ls.get('loc', '')}<br>
-                        <b>WEIGHT:</b> {ls.get('weight', 0.0):.1f} LBS<br>
-                        <b>ASH:</b> {ls.get('ash', 0.0):.1f}% | <b>HARDNESS:</b> {int(ls.get('hard', 0))}<br>
-                        <b>MOISTURE:</b> {ls.get('moist', 0.0):.2f}%
-                    </div>
-                </div>
-                <div style="text-align: center; margin-top: 30px;">
-                    <button onclick="window.print()" style="padding: 15px 30px; background: #28a745; color: white; border: none; font-size: 20px; cursor: pointer; border-radius: 8px;">🖨️ PRINT SCALED LABEL</button>
-                </div>
-                <style>
-                    @media print {{
-                        body * {{ visibility: hidden; }}
-                        #print-area, #print-area * {{ visibility: visible; }}
-                        #print-area {{ position: absolute; left: 20%; top: 5%; width: 60%; }}
-                    }}
-                </style>
-                """
-                st.components.v1.html(label_html, height=1000)
+        # --- VISUAL GRID MAP ---
+        elif choice == "Stock Inquiry (Grid Map)":
+            st.title("🔎 Warehouse Visual Grid")
+            conn = sqlite3.connect(DB_PATH)
+            loc_query = """
+                SELECT l.loc_id, l.status, t.product, t.bag_ref 
+                FROM locations l
+                LEFT JOIN test_results t ON l.loc_id = t.location_id AND t.status = 'Inventory'
+                ORDER BY l.loc_id ASC
+            """
+            df = pd.read_sql_query(loc_query, conn)
+            conn.close()
 
-        # --- REMAINING SECTIONS ---
-        elif choice == "Reactor Logs":
-            st.title("🔥 Reactor Logs")
-            # (Standard Reactor Form)
-        elif choice == "Bagging Room":
-            st.title("🛍️ Bagging Room")
-            # (Standard Bagging logic)
-        elif choice == "Shipping":
-            st.title("🚢 Shipping")
-            # (Standard Shipping logic)
-        elif choice == "Analytics Dashboard":
-            st.title("📈 Analytics")
-            # (Standard Analytics logic)
-        elif choice == "Stock Inquiry":
-            st.title("🔎 Stock Inquiry")
-            # (Standard Stock logic)
+            # Mapping for Heatmap: 0=Available (Green), 1=Revolution (Black), 2=Paris (Yellow)
+            def map_color(row):
+                if row['status'] == 'Available': return 0
+                return 1 if row['product'] == 'Revolution CB' else 2
+
+            df['color_val'] = df.apply(map_color, axis=1)
+            z_data = df['color_val'].values.reshape(10, 10)
+            text_data = df.apply(lambda r: f"Loc: {r['loc_id']}<br>Prod: {r['product'] or 'Empty'}<br>ID: {r['bag_ref'] or ''}", axis=1).values.reshape(10, 10)
+
+            fig = go.Figure(data=go.Heatmap(
+                z=z_data, text=text_data, hoverinfo="text",
+                colorscale=[[0, '#28a745'], [0.5, '#000000'], [1, '#ffc107']],
+                showscale=False, xgap=5, ygap=5
+            ))
+            fig.update_layout(height=600, xaxis_visible=False, yaxis_visible=False, title="100-Slot Warehouse Map")
+            
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Available", len(df[df['status'] == 'Available']))
+            c2.metric("Revolution (Black)", len(df[df['product'] == 'Revolution CB']))
+            c3.metric("Paris (Yellow)", len(df[df['product'] == 'Paris CB']))
+            
+            st.plotly_chart(fig, use_container_width=True)
+
         elif choice == "View Records":
-            st.title("📊 View Records")
-            # (Standard Records logic)
+            st.title("📊 Master Ledger")
+            conn = sqlite3.connect(DB_PATH)
+            st.dataframe(pd.read_sql_query("SELECT * FROM test_results ORDER BY timestamp DESC", conn), use_container_width=True)
+            conn.close()
 
 if __name__ == '__main__':
     main()
-import migrate
-if st.sidebar.button("🚀 RUN ONE-TIME MIGRATION"):
-    migrate.migrate()
-    st.sidebar.success("Migration Finished!")
+
 
 
