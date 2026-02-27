@@ -7,6 +7,7 @@ import os
 import qrcode
 import base64
 from io import BytesIO
+import plotly.express as px
 import plotly.graph_objects as go
 
 # --- CONFIGURATION ---
@@ -145,56 +146,62 @@ def main():
                     c.execute('''INSERT INTO test_results (bag_ref, timestamp, operator, product, location, pellet_hardness, moisture, toluene, ash_content, weight_lbs)
                                  VALUES (?,?,?,?,?,?,?,?,?,?)''', (bag_id, ts, st.session_state['user_display'], prod, loc, hard, moist, tol, ash, weight))
                     conn.commit(); conn.close()
-                    # Store data with moisture included
                     st.session_state['last_sack'] = {"id": bag_id, "prod": prod, "loc": loc, "weight": weight, "moist": moist, "ash": ash, "hard": hard, "ts": ts}
 
             if 'last_sack' in st.session_state:
                 ls = st.session_state['last_sack']
                 qr_code = generate_qr_base64(ls['id'])
                 
-                # OPTIMIZED FULL PAGE LETTER LABEL
+                # REDUCED SIZE (60%) FULL PAGE LETTER LABEL
                 label_html = f"""
-                <div id="print-area" style="width: 80%; padding: 40px; border: 12px solid black; font-family: Arial, sans-serif; background: white; color: black; margin: auto; text-align: center;">
-                    <div style="font-size: 80px; font-weight: 900; border-bottom: 8px solid black;">{ls.get('prod', '')}</div>
+                <div id="print-area" style="width: 60%; padding: 30px; border: 10px solid black; font-family: Arial, sans-serif; background: white; color: black; margin: auto; text-align: center;">
+                    <div style="font-size: 60px; font-weight: 900; border-bottom: 6px solid black;">{ls.get('prod', '')}</div>
                     
-                    <div style="padding: 30px 0;">
-                        <img src="data:image/png;base64,{qr_code}" style="width: 400px;">
-                        <div style="font-size: 50px; font-weight: bold;">{ls.get('id', '')}</div>
+                    <div style="padding: 20px 0;">
+                        <img src="data:image/png;base64,{qr_code}" style="width: 320px;">
+                        <div style="font-size: 40px; font-weight: bold;">{ls.get('id', '')}</div>
                     </div>
                     
-                    <div style="font-size: 40px; border-top: 8px solid black; padding-top: 20px; text-align: left; line-height: 1.4;">
-                        <strong>LOCATION:</strong> {ls.get('loc', '')}<br>
-                        <strong>WEIGHT:</strong> {ls.get('weight', 0.0):.1f} LBS<br>
-                        <strong>ASH:</strong> {ls.get('ash', 0.0):.1f}% | <strong>HARDNESS:</strong> {int(ls.get('hard', 0))}<br>
-                        <strong>MOISTURE:</strong> {ls.get('moist', 0.0):.2f}%
+                    <div style="font-size: 32px; border-top: 6px solid black; padding-top: 15px; text-align: left; line-height: 1.4;">
+                        <b>LOCATION:</b> {ls.get('loc', '')}<br>
+                        <b>WEIGHT:</b> {ls.get('weight', 0.0):.1f} LBS<br>
+                        <b>ASH:</b> {ls.get('ash', 0.0):.1f}% | <b>HARDNESS:</b> {int(ls.get('hard', 0))}<br>
+                        <b>MOISTURE:</b> {ls.get('moist', 0.0):.2f}%
                     </div>
                 </div>
                 <div style="text-align: center; margin-top: 30px;">
-                    <button onclick="window.print()" style="padding: 20px 40px; background: #28a745; color: white; border: none; font-size: 24px; cursor: pointer; border-radius: 10px;">🖨️ PRINT FULL LETTER LABEL</button>
+                    <button onclick="window.print()" style="padding: 15px 30px; background: #28a745; color: white; border: none; font-size: 20px; cursor: pointer; border-radius: 8px;">🖨️ PRINT SCALED LABEL</button>
                 </div>
                 <style>
                     @media print {{
                         body * {{ visibility: hidden; }}
                         #print-area, #print-area * {{ visibility: visible; }}
-                        #print-area {{ position: absolute; left: 10%; top: 0; width: 80%; }}
+                        #print-area {{ position: absolute; left: 20%; top: 5%; width: 60%; }}
                     }}
                 </style>
                 """
-                st.components.v1.html(label_html, height=1100)
+                st.components.v1.html(label_html, height=1000)
 
-        # --- ALL OTHER SECTIONS remain the same ---
+        # --- REMAINING SECTIONS ---
         elif choice == "Reactor Logs":
             st.title("🔥 Reactor Logs")
+            # (Standard Reactor Form)
         elif choice == "Bagging Room":
             st.title("🛍️ Bagging Room")
+            # (Standard Bagging logic)
         elif choice == "Shipping":
-            st.title("🚢 Dispatch")
+            st.title("🚢 Shipping")
+            # (Standard Shipping logic)
+        elif choice == "Analytics Dashboard":
+            st.title("📈 Analytics")
+            # (Standard Analytics logic)
         elif choice == "Stock Inquiry":
             st.title("🔎 Stock Inquiry")
+            # (Standard Stock logic)
         elif choice == "View Records":
-            st.title("📊 Master Ledger")
+            st.title("📊 View Records")
+            # (Standard Records logic)
 
 if __name__ == '__main__':
     main()
-
 
