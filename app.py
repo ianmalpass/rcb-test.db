@@ -20,10 +20,12 @@ def init_db():
                     bag_ref TEXT UNIQUE,
                     timestamp DATETIME,
                     operator TEXT,
+                    shipped_by TEXT,
                     product TEXT,
                     location_id TEXT,
                     status TEXT DEFAULT 'Inventory',
                     customer_name TEXT DEFAULT 'In Inventory',
+                    shipped_date TEXT DEFAULT 'Not Shipped',
                     weight_lbs REAL,
                     pellet_hardness INTEGER,
                     moisture REAL,
@@ -73,14 +75,17 @@ def main():
 
     if not st.session_state['logged_in']:
         st.title("🔒 AI-sistant Login")
-        u = st.text_input("Username")
-        p = st.text_input("Password", type='password')
+        u, p = st.text_input("Username"), st.text_input("Password", type='password')
         if st.button("Login"):
             if u.lower() in ["admin", "operator"]:
                 st.session_state.update({"logged_in": True, "user_display": u.capitalize()})
                 st.rerun()
     else:
         st.sidebar.title("AI-sistant")
+        if 'last_sack' in st.session_state:
+            if st.sidebar.button("🖨️ Reprint Last Label"):
+                st.session_state['show_label'] = True
+
         menu = ["Production Dashboard", "Production (Inventory)", "Shipping (FIFO)", "Stock Inquiry (Grid Map)", "View Records"]
         choice = st.sidebar.selectbox("Go to:", menu)
 
@@ -119,8 +124,8 @@ def main():
                         moist = st.number_input("Moisture %", format="%.2f")
                         tol = st.number_input("Toluene", step=1)
                         ash = st.number_input("Ash %", format="%.1f")
+                    
                     if st.form_submit_button("Record & Generate Label"):
-                        # Added seconds to bag_id to fix IntegrityError
                         bag_id = f"RCB-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
                         conn = sqlite3.connect(DB_PATH); c = conn.cursor()
                         try:
@@ -154,39 +159,50 @@ def main():
                 """
                 st.components.v1.html(label_html, height=950)
 
-        # --- 3. SHIPPING ---
+        # --- 3. SHIPPING (FIFO) ---
         elif choice == "Shipping (FIFO)":
             st.title("🚢 Auto-Dispatch (FIFO)")
-            ship_prod = st.selectbox("Product to Ship", ["Revolution CB", "Paris CB"])
+            ship_prod = st.selectbox("Select Product to Ship", ["Revolution CB", "Paris CB"])
             conn = sqlite3.connect(DB_PATH); c = conn.cursor()
-            c.execute("SELECT bag_ref, location_id FROM test_results WHERE product = ? AND status = 'Inventory' ORDER BY timestamp ASC LIMIT 1", (ship_prod,))
+            c.execute("SELECT bag_ref, location_id, timestamp FROM test_results WHERE product = ? AND status = 'Inventory' ORDER BY timestamp ASC LIMIT 1", (ship_prod,))
             oldest = c.fetchone()
             if oldest:
                 st.metric("Go to Location", oldest[1])
-                if st.button(f"Confirm Shipment of {oldest[0]}"):
-                    c.execute("UPDATE test_results SET status = 'Shipped' WHERE bag_ref = ?", (oldest[0],))
-                    c.execute("UPDATE locations SET status = 'Available' WHERE loc_id = ?", (oldest[1],))
-                    conn.commit(); conn.close(); st.rerun()
+                st.write(f"**Oldest Bag ID:** {oldest[0]} | **Produced:** {oldest[2]}")
+                with st.form("ship_confirm"):
+                    cust_name = st.text_input("Customer Name / Destination")
+                    if st.form_submit_button(f"Confirm Shipment of {oldest[0]}"):
+                        if not cust_name:
+                            st.error("Please enter a customer name.")
+                        else:
+                            ship_ts = datetime.now().strftime("%Y-%m-%d")
+                            c.execute("UPDATE test_results SET status = 'Shipped', customer_name = ?, shipped_date = ?, shipped_by = ? WHERE bag_ref = ?", 
+                                      (cust_name, ship_ts, st.session_state['user_display'], oldest[0]))
+                            c.execute("UPDATE locations SET status = 'Available' WHERE loc_id = ?", (oldest[1],))
+                            conn.commit(); st.balloons(); st.rerun()
+                conn.close()
             else:
                 st.warning("No stock available."); conn.close()
 
-        # --- 4. GRID MAP (FIXED CONTRAST LOGIC) ---
+        # --- 4. GRID MAP (FIXED CONTRAST ERROR) ---
         elif choice == "Stock Inquiry (Grid Map)":
             st.title("🔎 Warehouse Visual Grid")
             conn = sqlite3.connect(DB_PATH)
             loc_query = "SELECT l.loc_id, l.status, t.product FROM locations l LEFT JOIN test_results t ON l.loc_id = t.location_id AND t.status = 'Inventory' ORDER BY l.loc_id ASC"
             df = pd.read_sql_query(loc_query, conn); conn.close()
+            
+            # Map values and colors correctly
             df['color_val'] = df.apply(lambda r: 0 if r['status'] == 'Available' else (1 if r['product'] == 'Revolution CB' else 2), axis=1)
             df['t_color'] = df['product'].apply(lambda p: 'black' if p == 'Paris CB' else 'white')
             df['display_num'] = df['loc_id'].str.extract('(\d+)')
             
             z_data = df['color_val'].values.reshape(10, 10)
             number_labels = df['display_num'].values.reshape(10, 10)
-            
-            # Corrected textfont color mapping for Plotly Heatmap
+            text_colors = df['t_color'].values.reshape(10, 10)
+
             fig = go.Figure(data=go.Heatmap(
                 z=z_data, text=number_labels, texttemplate="<b>%{text}</b>",
-                textfont={"size": 32, "family": "Arial Black", "color": df['t_color'].tolist()},
+                textfont={"size": 32, "family": "Arial Black", "color": text_colors.flatten().tolist()},
                 colorscale=[[0, '#28a745'], [0.5, '#000000'], [1, '#ffc107']],
                 showscale=False, xgap=8, ygap=8
             ))
