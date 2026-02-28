@@ -432,7 +432,15 @@ def page_bagging():
         )
 
         # 2. Mark supersack consumed and free warehouse slot
-        c.execute("UPDATE test_results SET status='Consumed (Bagged)' WHERE bag_ref=?", (selected_sack_id,))
+        c.execute(
+            """UPDATE test_results
+               SET status='Consumed (Bagged)',
+                   customer_name='Consumed — Bagged to ' || ?,
+                   shipped_date=?,
+                   shipped_by=?
+               WHERE bag_ref=?""",
+            (pallet.strip(), now.strftime("%Y-%m-%d"), operator, selected_sack_id)
+        )
         c.execute("UPDATE locations SET status='Available' WHERE loc_id=?", (loc_to_free,))
         conn.commit()
         conn.close()
@@ -916,4 +924,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
