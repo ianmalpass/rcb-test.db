@@ -1,222 +1,557 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-from datetime import datetime, timedelta, date
+from datetime import datetime, date
 import qrcode
 import base64
 from io import BytesIO
-import random
 
-# --- CONFIGURATION ---
-DB_PATH = "rcb_inventory_v14.db"
+# ─────────────────────────────────────────────
+#  CONFIGURATION
+# ─────────────────────────────────────────────
+DB_PATH = "rcb_inventory.db"
 
-# --- 1. THE SELF-HEALING ENGINE ---
+USERS = {
+    "admin":    "Admin1234",
+    "operator": "Op1234",
+}
+
+PRODUCTS = ["Revolution CB", "Paris CB"]
+
+# ─────────────────────────────────────────────
+#  DATABASE
+# ─────────────────────────────────────────────
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    
-    # Create the core table with every field required
-    c.execute('''CREATE TABLE IF NOT EXISTS test_results (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    bag_ref TEXT UNIQUE,
-                    timestamp DATETIME,
-                    operator TEXT,
-                    product TEXT,
-                    location_id TEXT,
-                    status TEXT DEFAULT 'Inventory',
-                    customer_name TEXT DEFAULT 'In Inventory',
-                    shipped_date TEXT DEFAULT 'Not Shipped',
-                    shipped_by TEXT DEFAULT 'N/A',
-                    weight_lbs REAL,
-                    pellet_hardness INTEGER,
-                    moisture REAL,
-                    toluene INTEGER,
-                    ash_content REAL)''')
 
-    # SAFETY CHECK: Add any missing columns if the DB was created in an older version
-    cols = [
-        ('customer_name', "TEXT DEFAULT 'In Inventory'"),
-        ('shipped_date', "TEXT DEFAULT 'Not Shipped'"),
-        ('shipped_by', "TEXT DEFAULT 'N/A'"),
-        ('ash_content', "REAL"),
-        ('moisture', "REAL"),
-        ('toluene', "INTEGER"),
-        ('pellet_hardness', "INTEGER")
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS test_results (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            bag_ref         TEXT UNIQUE,
+            timestamp       DATETIME,
+            operator        TEXT,
+            product         TEXT,
+            location_id     TEXT,
+            status          TEXT DEFAULT 'Inventory',
+            customer_name   TEXT DEFAULT 'In Inventory',
+            shipped_date    TEXT DEFAULT 'Not Shipped',
+            shipped_by      TEXT DEFAULT 'N/A',
+            weight_lbs      REAL,
+            pellet_hardness INTEGER,
+            moisture        REAL,
+            toluene         INTEGER,
+            ash_content     REAL
+        )
+    """)
+
+    # Self-healing columns (safe to run every time)
+    extra_cols = [
+        ("customer_name",   "TEXT DEFAULT 'In Inventory'"),
+        ("shipped_date",    "TEXT DEFAULT 'Not Shipped'"),
+        ("shipped_by",      "TEXT DEFAULT 'N/A'"),
+        ("ash_content",     "REAL"),
+        ("moisture",        "REAL"),
+        ("toluene",         "INTEGER"),
+        ("pellet_hardness", "INTEGER"),
     ]
-    for col_name, col_def in cols:
+    for col_name, col_def in extra_cols:
         try:
             c.execute(f"ALTER TABLE test_results ADD COLUMN {col_name} {col_def}")
         except sqlite3.OperationalError:
-            pass # Column already exists
+            pass
 
-    # Location Table
-    c.execute('''CREATE TABLE IF NOT EXISTS locations (loc_id TEXT PRIMARY KEY, status TEXT DEFAULT 'Available')''')
-    
-    # Ensure 100 locations exist
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS locations (
+            loc_id TEXT PRIMARY KEY,
+            status TEXT DEFAULT 'Available'
+        )
+    """)
+
     c.execute("SELECT COUNT(*) FROM locations")
     if c.fetchone()[0] == 0:
         for i in range(1, 101):
-            c.execute("INSERT INTO locations (loc_id, status) VALUES (?, 'Available')", (f"WH-{i:03d}",))
-    
+            c.execute(
+                "INSERT INTO locations (loc_id, status) VALUES (?, 'Available')",
+                (f"WH-{i:03d}",)
+            )
+
     conn.commit()
     conn.close()
 
-# --- 2. THE TEST ENGINE ---
-def run_full_test():
-    conn = sqlite3.connect(DB_PATH); c = conn.cursor()
-    c.execute("DELETE FROM test_results")
-    c.execute("UPDATE locations SET status = 'Available'")
-    
-    prods = ["Revolution CB", "Paris CB"]
-    # 50 bags produced
-    for i in range(50):
-        p = prods[0] if i < 25 else prods[1]
-        ts = (datetime.now() - timedelta(days=random.randint(1, 10))).strftime("%Y-%m-%d %H:%M:%S")
-        bid = f"TEST-BAG-{random.randint(1000,9999)}-{i}"
-        loc = f"WH-{(i+1):03d}"
-        c.execute("INSERT INTO test_results (bag_ref, timestamp, operator, product, location_id, weight_lbs, status) VALUES (?,?,?,?,?,2000.0,'Inventory')", (bid, ts, "System", p, loc))
-        c.execute("UPDATE locations SET status = 'Occupied' WHERE loc_id = ?", (loc,))
-    
-    # 25 of each shipped (total 50)
-    for p in prods:
-        c.execute("SELECT bag_ref, location_id FROM test_results WHERE product=? AND status='Inventory' LIMIT 25", (p,))
-        rows = c.fetchall()
-        for bid, loc in rows:
-            c.execute("UPDATE test_results SET status='Shipped', customer_name='Test Client', shipped_date=? WHERE bag_ref=?", (date.today().strftime("%Y-%m-%d"), bid))
-            c.execute("UPDATE locations SET status='Available' WHERE loc_id=?", (loc,))
-    conn.commit(); conn.close()
-    return "Test Success: 50 Created, 50 Shipped."
 
-# --- 3. HELPERS ---
-def generate_qr(data):
-    qr = qrcode.QRCode(version=1, box_size=10, border=2)
-    qr.add_data(data); qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
-    buf = BytesIO(); img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
+def get_conn():
+    return sqlite3.connect(DB_PATH)
 
-def get_loc():
-    conn = sqlite3.connect(DB_PATH); c = conn.cursor()
-    c.execute("SELECT loc_id FROM locations WHERE status = 'Available' ORDER BY loc_id ASC LIMIT 1")
-    res = c.fetchone(); conn.close()
+
+def get_next_loc():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "SELECT loc_id FROM locations WHERE status='Available' ORDER BY loc_id ASC LIMIT 1"
+    )
+    res = c.fetchone()
+    conn.close()
     return res[0] if res else None
 
-# --- 4. MAIN APP ---
+
+# ─────────────────────────────────────────────
+#  QR / LABEL HELPER
+# ─────────────────────────────────────────────
+def generate_qr_b64(data: str) -> str:
+    qr = qrcode.QRCode(version=1, box_size=10, border=2)
+    qr.add_data(data)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def render_label(ls: dict):
+    """Render a printable label inside a self-contained HTML page (popup approach)."""
+    qr_b64 = generate_qr_b64(ls["id"])
+    ts = ls.get("ts", "")
+
+    # Build a standalone HTML string that opens in a new tab and auto-prompts print
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <meta charset="UTF-8">
+    <title>Bag Label – {ls['id']}</title>
+    <style>
+      body {{ margin: 0; background: white; font-family: Arial, sans-serif; }}
+      .label {{
+        width: 700px; margin: 30px auto; padding: 30px;
+        border: 10px solid black; text-align: center;
+      }}
+      .product  {{ font-size: 56px; font-weight: 900; border-bottom: 6px solid black; padding-bottom: 12px; }}
+      .bagid    {{ font-size: 28px; font-weight: bold; margin-top: 8px; }}
+      .details  {{ font-size: 26px; text-align: left; border-top: 6px solid black;
+                   margin-top: 20px; padding-top: 15px; line-height: 1.7; }}
+      .footer   {{ margin-top: 20px; font-size: 18px; color: #555; }}
+      @media print {{
+        .no-print {{ display: none; }}
+        body {{ margin: 0; }}
+      }}
+    </style>
+    </head>
+    <body>
+    <div class="label">
+      <div class="product">{ls['prod']}</div>
+      <img src="data:image/png;base64,{qr_b64}" width="280"><br>
+      <div class="bagid">{ls['id']}</div>
+      <div class="details">
+        <b>Location:</b> {ls['loc']}<br>
+        <b>Weight:</b> {ls['weight']:.1f} lbs<br>
+        <b>Ash:</b> {ls['ash']:.2f}%&nbsp;&nbsp;&nbsp;<b>Hardness:</b> {int(ls['hard'])}<br>
+        <b>Moisture:</b> {ls['moist']:.2f}%&nbsp;&nbsp;&nbsp;<b>Toluene:</b> {ls['tol']}<br>
+        <b>Operator:</b> {ls['operator']}<br>
+        <b>Date/Time:</b> {ts}
+      </div>
+      <div class="footer">Revolution Carbon Black — Pyrolysis Facility</div>
+    </div>
+    <div class="no-print" style="text-align:center; margin: 20px;">
+      <button onclick="window.print()"
+        style="padding:14px 32px; background:#28a745; color:white;
+               border:none; font-size:20px; cursor:pointer; border-radius:6px;">
+        🖨️ Print Label
+      </button>
+    </div>
+    <script>
+      // small delay so the image renders before the dialog opens
+      setTimeout(() => window.print(), 600);
+    </script>
+    </body>
+    </html>
+    """
+
+    b64 = base64.b64encode(html.encode()).decode()
+    href = f"data:text/html;base64,{b64}"
+
+    st.markdown(
+        f"""
+        <a href="{href}" target="_blank"
+           style="display:inline-block; padding:14px 32px; background:#28a745;
+                  color:white; text-decoration:none; font-size:18px;
+                  border-radius:6px; font-family:Arial;">
+           🖨️ Open & Print Label (new tab)
+        </a>
+        &nbsp;
+        <span style="font-size:16px; color:#555;">
+            Bag <b>{ls['id']}</b> → Location <b>{ls['loc']}</b>
+        </span>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ─────────────────────────────────────────────
+#  LOGIN PAGE
+# ─────────────────────────────────────────────
+def login_page():
+    st.title("🔒 RCB Inventory – Login")
+    st.markdown("---")
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        if st.button("Login", use_container_width=True):
+            uname = username.strip().lower()
+            if uname in USERS and USERS[uname] == password.strip():
+                st.session_state["logged_in"]    = True
+                st.session_state["user_display"] = uname.capitalize()
+                st.session_state["role"]         = "admin" if uname == "admin" else "operator"
+                st.rerun()
+            else:
+                st.error("Invalid username or password.")
+
+    st.caption("Default credentials — admin / Admin1234 · operator / Op1234")
+
+
+# ─────────────────────────────────────────────
+#  PRODUCTION DASHBOARD
+# ─────────────────────────────────────────────
+def page_dashboard():
+    st.title("📊 Production Dashboard")
+
+    conn = get_conn()
+    df = pd.read_sql_query("SELECT * FROM test_results", conn)
+    conn.close()
+
+    if df.empty:
+        st.info("No production records yet.")
+        return
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+    # ── Top KPIs ──
+    inv  = df[df["status"] == "Inventory"]
+    ship = df[df["status"] == "Shipped"]
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Total Bags Produced",  len(df))
+    k2.metric("Currently in Inventory", len(inv))
+    k3.metric("Total Shipped",         len(ship))
+    k4.metric("Total Weight in Stock (lbs)", f"{inv['weight_lbs'].sum():,.0f}")
+
+    st.markdown("---")
+
+    # ── Daily Production Chart ──
+    st.subheader("Daily Production (last 30 days)")
+    cutoff = pd.Timestamp.now() - pd.Timedelta(days=30)
+    daily  = (
+        df[df["timestamp"] >= cutoff]
+        .groupby([df["timestamp"].dt.date, "product"])
+        .size()
+        .reset_index(name="count")
+        .rename(columns={"timestamp": "Date"})
+    )
+    if not daily.empty:
+        pivot = daily.pivot(index="Date", columns="product", values="count").fillna(0)
+        st.bar_chart(pivot)
+    else:
+        st.info("No production in the last 30 days.")
+
+    # ── Product split ──
+    st.subheader("Inventory by Product")
+    c1, c2 = st.columns(2)
+    for prod, col in zip(PRODUCTS, [c1, c2]):
+        subset = inv[inv["product"] == prod]
+        col.metric(prod, f"{len(subset)} bags / {subset['weight_lbs'].sum():,.0f} lbs")
+
+    # ── Quality averages (inventory) ──
+    st.subheader("Average Quality — Current Inventory")
+    if not inv.empty:
+        qa = inv[["pellet_hardness", "moisture", "toluene", "ash_content"]].mean()
+        q1, q2, q3, q4 = st.columns(4)
+        q1.metric("Avg Hardness",  f"{qa['pellet_hardness']:.1f}")
+        q2.metric("Avg Moisture %", f"{qa['moisture']:.2f}")
+        q3.metric("Avg Toluene",    f"{qa['toluene']:.0f}")
+        q4.metric("Avg Ash %",      f"{qa['ash_content']:.2f}")
+
+    # ── Recent activity ──
+    st.subheader("Recent Activity (last 10 records)")
+    recent = df.sort_values("timestamp", ascending=False).head(10)[
+        ["timestamp", "bag_ref", "product", "location_id", "status", "weight_lbs", "customer_name"]
+    ]
+    st.dataframe(recent, use_container_width=True)
+
+
+# ─────────────────────────────────────────────
+#  PRODUCTION / INVENTORY
+# ─────────────────────────────────────────────
+def page_production():
+    st.title("🏗️ Bulk Production — Record New Bag")
+
+    loc = get_next_loc()
+    if not loc:
+        st.error("🚨 Warehouse Full — no available locations!")
+        return
+
+    with st.form("prod_form", clear_on_submit=True):
+        st.info(f"📍 Auto-Assigned Location: **{loc}**")
+
+        prod = st.selectbox("Product", PRODUCTS)
+        c1, c2 = st.columns(2)
+        with c1:
+            weight = st.number_input("Weight (lbs)", min_value=0.0, value=2000.0, step=10.0)
+            hard   = st.number_input("Pellet Hardness", min_value=0, value=0, step=1)
+            moist  = st.number_input("Moisture %", min_value=0.0, value=0.0, format="%.2f")
+        with c2:
+            tol = st.number_input("Toluene", min_value=0, value=0, step=1)
+            ash = st.number_input("Ash %",   min_value=0.0, value=0.0, format="%.2f")
+
+        submitted = st.form_submit_button("✅ Record & Print Label", use_container_width=True)
+
+    if submitted:
+        now = datetime.now()
+        bid = f"RCB-{now.strftime('%Y%m%d-%H%M%S')}"
+        conn = get_conn()
+        c = conn.cursor()
+        try:
+            c.execute(
+                """INSERT INTO test_results
+                   (bag_ref,timestamp,operator,product,location_id,
+                    weight_lbs,pellet_hardness,moisture,toluene,ash_content)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (bid, now, st.session_state["user_display"],
+                 prod, loc, weight, hard, moist, tol, ash),
+            )
+            c.execute("UPDATE locations SET status='Occupied' WHERE loc_id=?", (loc,))
+            conn.commit()
+        except sqlite3.IntegrityError:
+            st.error("Duplicate bag ID — please try again.")
+            conn.close()
+            return
+        conn.close()
+
+        st.success(f"✅ Bag **{bid}** recorded at location **{loc}**")
+        st.session_state["last_sack"] = {
+            "id":       bid,
+            "prod":     prod,
+            "loc":      loc,
+            "weight":   weight,
+            "ash":      ash,
+            "hard":     hard,
+            "moist":    moist,
+            "tol":      tol,
+            "operator": st.session_state["user_display"],
+            "ts":       now.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    if "last_sack" in st.session_state:
+        st.markdown("---")
+        st.subheader("🏷️ Label for Last Recorded Bag")
+        render_label(st.session_state["last_sack"])
+        if st.button("Clear Label"):
+            del st.session_state["last_sack"]
+            st.rerun()
+
+
+# ─────────────────────────────────────────────
+#  SHIPPING — FIFO
+# ─────────────────────────────────────────────
+def page_shipping():
+    st.title("🚢 FIFO Shipping")
+
+    prod = st.selectbox("Select Product", PRODUCTS)
+
+    conn = get_conn()
+    fifo_df = pd.read_sql_query(
+        """SELECT bag_ref, location_id, timestamp, weight_lbs, ash_content,
+                  pellet_hardness, moisture, toluene
+           FROM test_results
+           WHERE product=? AND status='Inventory'
+           ORDER BY timestamp ASC""",
+        conn, params=(prod,)
+    )
+    conn.close()
+
+    if fifo_df.empty:
+        st.warning(f"No **{prod}** bags currently in inventory.")
+        return
+
+    st.info(f"📦 **{len(fifo_df)} bags** in stock for {prod}. Oldest bag ships first.")
+    oldest = fifo_df.iloc[0]
+    st.metric("Next Bag to Ship", oldest["bag_ref"])
+    st.metric("Location", oldest["location_id"])
+
+    with st.expander("📋 All available bags (oldest first)", expanded=False):
+        st.dataframe(fifo_df, use_container_width=True)
+
+    st.markdown("---")
+    st.subheader("Ship Bags")
+
+    with st.form("ship_form"):
+        cust     = st.text_input("Customer Name *")
+        ship_by  = st.text_input("Shipped By (driver / reference) *")
+        qty      = st.number_input(
+            f"Number of bags to ship (max {len(fifo_df)})",
+            min_value=1, max_value=len(fifo_df), value=1, step=1
+        )
+        note     = st.text_area("Notes (optional)")
+        submit   = st.form_submit_button("🚢 Confirm Shipment", use_container_width=True)
+
+    if submit:
+        if not cust.strip():
+            st.error("Customer name is required.")
+            return
+        if not ship_by.strip():
+            st.error("'Shipped By' is required.")
+            return
+
+        bags_to_ship = fifo_df.head(int(qty))["bag_ref"].tolist()
+        locs_to_free = fifo_df.head(int(qty))["location_id"].tolist()
+        today_str    = str(date.today())
+
+        conn = get_conn()
+        c = conn.cursor()
+        for bag, loc in zip(bags_to_ship, locs_to_free):
+            c.execute(
+                """UPDATE test_results
+                   SET status='Shipped', customer_name=?, shipped_date=?, shipped_by=?
+                   WHERE bag_ref=?""",
+                (cust.strip(), today_str, ship_by.strip(), bag),
+            )
+            c.execute("UPDATE locations SET status='Available' WHERE loc_id=?", (loc,))
+        conn.commit()
+        conn.close()
+
+        st.success(f"✅ Shipped **{qty} bag(s)** to **{cust}**")
+        st.balloons()
+        if note.strip():
+            st.info(f"Note saved: {note}")
+
+
+# ─────────────────────────────────────────────
+#  LOCATION DIRECTORY
+# ─────────────────────────────────────────────
+def page_locations():
+    st.title("📂 Warehouse Location Directory")
+
+    conn = get_conn()
+    df = pd.read_sql_query(
+        """SELECT l.loc_id   AS 'Location',
+                  l.status   AS 'Status',
+                  t.product  AS 'Product',
+                  t.bag_ref  AS 'Bag ID',
+                  t.weight_lbs AS 'Weight (lbs)',
+                  t.ash_content AS 'Ash %',
+                  t.timestamp AS 'Recorded'
+           FROM locations l
+           LEFT JOIN test_results t
+             ON l.loc_id = t.location_id AND t.status = 'Inventory'
+           ORDER BY l.loc_id ASC""",
+        conn,
+    )
+    conn.close()
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total Slots",       len(df))
+    c2.metric("Available",         len(df[df["Status"] == "Available"]))
+    c3.metric("Revolution CB",     len(df[df["Product"] == "Revolution CB"]))
+    c4.metric("Paris CB",          len(df[df["Product"] == "Paris CB"]))
+
+    # Filter
+    filt = st.selectbox("Filter by Status", ["All", "Available", "Occupied"])
+    view = df if filt == "All" else df[df["Status"] == filt]
+
+    st.dataframe(view, use_container_width=True, height=600)
+
+
+# ─────────────────────────────────────────────
+#  VIEW / EXPORT RECORDS
+# ─────────────────────────────────────────────
+def page_records():
+    st.title("📋 Master Records")
+
+    conn = get_conn()
+    df = pd.read_sql_query(
+        "SELECT * FROM test_results ORDER BY timestamp DESC", conn
+    )
+    conn.close()
+
+    if df.empty:
+        st.info("No records yet.")
+        return
+
+    # ── Filters ──
+    with st.expander("🔎 Filter Records", expanded=True):
+        f1, f2, f3 = st.columns(3)
+        with f1:
+            prod_f = st.selectbox("Product", ["All"] + PRODUCTS)
+        with f2:
+            stat_f = st.selectbox("Status", ["All", "Inventory", "Shipped"])
+        with f3:
+            date_from = st.date_input("From date", value=date(2020, 1, 1))
+            date_to   = st.date_input("To date",   value=date.today())
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    mask = (
+        (df["timestamp"].dt.date >= date_from) &
+        (df["timestamp"].dt.date <= date_to)
+    )
+    if prod_f != "All":
+        mask &= df["product"] == prod_f
+    if stat_f != "All":
+        mask &= df["status"] == stat_f
+    filtered = df[mask]
+
+    st.markdown(f"**{len(filtered)} records** match your filters.")
+    st.dataframe(filtered, use_container_width=True, height=500)
+
+    # ── CSV Export ──
+    csv = filtered.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="⬇️ Download as CSV",
+        data=csv,
+        file_name=f"rcb_records_{date.today()}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
+# ─────────────────────────────────────────────
+#  MAIN
+# ─────────────────────────────────────────────
 def main():
-    st.set_page_config(page_title="AI-sistant", layout="wide")
+    st.set_page_config(page_title="RCB Inventory", page_icon="⚫", layout="wide")
     init_db()
 
-    if not st.session_state.get('logged_in'):
-        st.title("🔒 Login")
-        u = st.text_input("Username")
-        if st.button("Login") and u.lower() in ['admin', 'operator']:
-            st.session_state.update({'logged_in': True, 'user_display': u.capitalize()})
+    if not st.session_state.get("logged_in"):
+        login_page()
+        return
+
+    # ── Sidebar ──
+    with st.sidebar:
+        st.title("⚫ RCB Inventory")
+        st.caption(f"Logged in as: **{st.session_state['user_display']}**")
+        st.markdown("---")
+
+        menu = [
+            "📊 Dashboard",
+            "🏗️ Production",
+            "🚢 Shipping (FIFO)",
+            "📂 Location Directory",
+            "📋 View / Export Records",
+        ]
+        choice = st.radio("Navigate", menu, label_visibility="collapsed")
+
+        st.markdown("---")
+        if st.button("🔒 Logout", use_container_width=True):
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
             st.rerun()
-    else:
-        st.sidebar.title("AI-sistant")
-        # DEV TOOLS
-        if st.sidebar.checkbox("🛠️ Developer Tools"):
-            if st.sidebar.button("🧪 Run 50-Bag Test"):
-                st.sidebar.success(run_full_test()); st.rerun()
-            if st.sidebar.button("🗑️ Wipe All Data"):
-                conn = sqlite3.connect(DB_PATH); c = conn.cursor()
-                c.execute("DELETE FROM test_results"); c.execute("UPDATE locations SET status='Available'")
-                conn.commit(); conn.close(); st.sidebar.warning("Data Wiped"); st.rerun()
 
-        menu = ["Production Dashboard", "Production (Inventory)", "Shipping (FIFO)", "Stock Inquiry (Grid Map)", "View Records"]
-        choice = st.sidebar.selectbox("Go to:", menu)
+    # ── Page Router ──
+    if "Dashboard"   in choice: page_dashboard()
+    elif "Production" in choice: page_production()
+    elif "Shipping"   in choice: page_shipping()
+    elif "Location"   in choice: page_locations()
+    elif "Records"    in choice: page_records()
 
-        # --- GRID VIEW ---
-        if choice == "Stock Inquiry (Grid Map)":
-            st.title("🔎 Warehouse Visual Grid")
-            conn = sqlite3.connect(DB_PATH)
-            df = pd.read_sql_query("SELECT l.loc_id, l.status, t.product FROM locations l LEFT JOIN test_results t ON l.loc_id = t.location_id AND t.status = 'Inventory' ORDER BY l.loc_id ASC", conn)
-            conn.close()
-            df['val'] = df.apply(lambda r: 0 if r['status'] == 'Available' else (1 if r['product'] == 'Revolution CB' else 2), axis=1)
-            df['txt_c'] = df['product'].apply(lambda p: 'black' if p == 'Paris CB' else 'white')
-            df['num'] = df['loc_id'].str.extract('(\d+)')
-            
-            fig = go.Figure(data=go.Heatmap(
-                z=df['val'].values.reshape(10,10), text=df['num'].values.reshape(10,10), texttemplate="<b>%{text}</b>",
-                textfont={"size": 32, "family": "Arial Black", "color": df['txt_c'].tolist()},
-                colorscale=[[0, '#28a745'], [0.5, '#000000'], [1, '#ffc107']], showscale=False, xgap=8, ygap=8
-            ))
-            fig.update_layout(height=850, xaxis_visible=False, yaxis_visible=False, scaleanchor="x")
-            st.plotly_chart(fig, use_container_width=True)
 
-        # --- PRODUCTION (ALL FIELDS RESTORED) ---
-        elif choice == "Production (Inventory)":
-            st.title("🏗️ Bulk Production")
-            loc = get_loc()
-            if loc:
-                with st.form("prod_form", clear_on_submit=True):
-                    st.info(f"📍 Location Assigned: **{loc}**")
-                    prod = st.selectbox("Product", ["Revolution CB", "Paris CB"])
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        weight = st.number_input("Weight (lbs)", 2000.0)
-                        hard = st.number_input("Hardness", 0)
-                    with c2:
-                        moist = st.number_input("Moisture %", 0.0, format="%.2f")
-                        tol = st.number_input("Toluene", 0)
-                        ash = st.number_input("Ash %", 0.0)
-                    
-                    if st.form_submit_button("Record & Print"):
-                        bid = f"RCB-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}"
-                        conn = sqlite3.connect(DB_PATH); c = conn.cursor()
-                        c.execute("INSERT INTO test_results (bag_ref,timestamp,operator,product,location_id,weight_lbs,pellet_hardness,moisture,toluene,ash_content) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                                  (bid, datetime.now(), st.session_state['user_display'], prod, loc, weight, hard, moist, tol, ash))
-                        c.execute("UPDATE locations SET status='Occupied' WHERE loc_id=?", (loc,))
-                        conn.commit(); conn.close()
-                        st.session_state['last_sack'] = {"id": bid, "prod": prod, "loc": loc, "weight": weight, "ash": ash, "hard": hard, "moist": moist}
-                        st.session_state['show_label'] = True; st.rerun()
-
-                if st.session_state.get('show_label') and 'last_sack' in st.session_state:
-                    ls = st.session_state['last_sack']
-                    qr_c = generate_qr(ls['id'])
-                    label_html = f"""<div id="print-area" style="width:60%; padding:30px; border:10px solid black; font-family:Arial; background:white; color:black; margin:auto; text-align:center;">
-                        <div style="font-size:60px; font-weight:900; border-bottom:6px solid black;">{ls['prod']}</div>
-                        <div style="padding:20px 0;"><img src="data:image/png;base64,{qr_c}" style="width:320px;"><br><div style="font-size:40px; font-weight:bold;">{ls['id']}</div></div>
-                        <div style="font-size:32px; border-top:6px solid black; padding-top:15px; text-align:left; line-height:1.4;">
-                            <b>LOC:</b> {ls['loc']} | <b>WT:</b> {ls['weight']:.1f} lbs<br><b>ASH:</b> {ls['ash']:.1f}% | <b>HARD:</b> {int(ls['hard'])}<br><b>MOIST:</b> {ls['moist']:.2f}%
-                        </div></div><br><div style="text-align:center;">
-                        <button onclick="window.print()" style="padding:15px 30px; background:#28a745; color:white; border:none; font-size:20px; cursor:pointer;">🖨️ PRINT</button>
-                        <button onclick="window.location.reload()" style="padding:15px 30px; background:#6c757d; color:white; border:none; font-size:20px; cursor:pointer; margin-left:10px;">Done / Clear</button>
-                    </div><style>@media print {{ body * {{ visibility: hidden; }} #print-area, #print-area * {{ visibility: visible; }} #print-area {{ position: absolute; left:20%; top:5%; width:60%; }} }}</style>"""
-                    st.components.v1.html(label_html, height=950)
-
-        # --- SHIPPING (FIFO) ---
-        elif choice == "Shipping (FIFO)":
-            st.title("🚢 FIFO Shipping")
-            prod = st.selectbox("Product", ["Revolution CB", "Paris CB"])
-            conn = sqlite3.connect(DB_PATH); c = conn.cursor()
-            c.execute("SELECT bag_ref, location_id FROM test_results WHERE product=? AND status='Inventory' ORDER BY timestamp ASC LIMIT 1", (prod,))
-            res = c.fetchone()
-            if res:
-                st.metric("Go to Loc", res[1])
-                with st.form("ship_f"):
-                    cust = st.text_input("Customer Name")
-                    if st.form_submit_button("Ship Oldest Bag") and cust:
-                        c.execute("UPDATE test_results SET status='Shipped', customer_name=?, shipped_date=? WHERE bag_ref=?", (cust, date.today(), res[0]))
-                        c.execute("UPDATE locations SET status='Available' WHERE loc_id=?", (res[1],))
-                        conn.commit(); conn.close(); st.balloons(); st.rerun()
-            else: st.warning("No stock"); conn.close()
-
-        # --- DASHBOARD & RECORDS ---
-        elif choice == "Production Dashboard":
-            st.title("📊 Dashboard")
-            conn = sqlite3.connect(DB_PATH)
-            df = pd.read_sql_query("SELECT * FROM test_results", conn); conn.close()
-            st.metric("Total Made", len(df))
-            st.metric("Total Shipped", len(df[df['status'] == 'Shipped']))
-            
-        elif choice == "View Records":
-            st.title("📊 Records")
-            conn = sqlite3.connect(DB_PATH)
-            st.dataframe(pd.read_sql_query("SELECT * FROM test_results ORDER BY timestamp DESC", conn))
-            conn.close()
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
