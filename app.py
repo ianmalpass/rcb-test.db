@@ -19,6 +19,29 @@ USERS = {
 PRODUCTS = ["Revolution CB", "Paris CB"]
 
 # ─────────────────────────────────────────────
+#  QC REJECTION LIMITS  (set max/min to None to disable)
+# ─────────────────────────────────────────────
+QC_LIMITS = {
+    "moisture":        {"max": 1.0,  "min": None, "label": "Moisture %"},
+    "ash_content":     {"max": None, "min": None, "label": "Ash %"},
+    "pellet_hardness": {"max": None, "min": None, "label": "Hardness"},
+    "toluene":         {"max": None, "min": None, "label": "Toluene"},
+}
+
+def qc_check(moist, ash, hard, tol):
+    """Returns list of failure strings. Empty = PASS."""
+    failures = []
+    if QC_LIMITS["moisture"]["max"] is not None and moist > QC_LIMITS["moisture"]["max"]:
+        failures.append(f"Moisture {moist:.2f}% exceeds max {QC_LIMITS['moisture']['max']}%")
+    if QC_LIMITS["ash_content"]["max"] is not None and ash > QC_LIMITS["ash_content"]["max"]:
+        failures.append(f"Ash {ash:.2f}% exceeds max {QC_LIMITS['ash_content']['max']}%")
+    if QC_LIMITS["pellet_hardness"]["min"] is not None and hard < QC_LIMITS["pellet_hardness"]["min"]:
+        failures.append(f"Hardness {hard} below min {QC_LIMITS['pellet_hardness']['min']}")
+    if QC_LIMITS["toluene"]["max"] is not None and tol > QC_LIMITS["toluene"]["max"]:
+        failures.append(f"Toluene {tol} exceeds max {QC_LIMITS['toluene']['max']}")
+    return failures
+
+# ─────────────────────────────────────────────
 #  DATABASE
 # ─────────────────────────────────────────────
 def init_db():
@@ -109,9 +132,36 @@ def generate_qr_b64(data: str) -> str:
 
 
 def render_label(ls: dict):
-    """Render label inline as an iframe — works on Streamlit Cloud (no popup blocked)."""
-    qr_b64 = generate_qr_b64(ls["id"])
-    ts = ls.get("ts", "")
+    """Render label inline. If ls['rejected']=True, stamps REJECTED in red."""
+    qr_b64  = generate_qr_b64(ls["id"])
+    ts      = ls.get("ts", "")
+    rejected = ls.get("rejected", False)
+    reasons  = ls.get("reject_reasons", [])
+
+    border_colour = "#cc0000" if rejected else "black"
+    border_width  = "10px"    if rejected else "8px"
+
+    reject_banner = ""
+    if rejected:
+        reasons_html = "<br>".join(reasons)
+        reject_banner = f"""
+        <div style="
+            position:relative; margin: 10px 0;
+            background:#fff0f0; border: 4px solid #cc0000;
+            padding: 8px 12px; text-align:center;">
+          <div style="font-size:52px; font-weight:900; color:#cc0000;
+                      letter-spacing:6px; opacity:0.9; line-height:1;">
+            ❌ REJECTED
+          </div>
+          <div style="font-size:16px; color:#880000; margin-top:4px;">
+            {reasons_html}
+          </div>
+        </div>"""
+
+    btn_colour  = "#cc0000" if rejected else "#28a745"
+    btn_hover   = "#aa0000" if rejected else "#218838"
+    status_text = "REJECTED — DO NOT SHIP" if rejected else "Revolution Carbon Black — Pyrolysis Facility"
+    status_col  = "#cc0000" if rejected else "#666"
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -122,31 +172,31 @@ def render_label(ls: dict):
   body {{ background: #e8e8e8; font-family: Arial, sans-serif; padding: 12px; }}
   .label {{
     width: 100%; max-width: 660px; margin: 0 auto;
-    padding: 22px; border: 8px solid black;
+    padding: 22px; border: {border_width} solid {border_colour};
     background: white; text-align: center;
   }}
   .product  {{ font-size: 44px; font-weight: 900;
-               border-bottom: 5px solid black; padding-bottom: 10px; margin-bottom: 10px; }}
+               border-bottom: 5px solid {border_colour}; padding-bottom: 10px; margin-bottom: 10px; }}
   .bagid    {{ font-size: 20px; font-weight: bold; margin-top: 6px; letter-spacing: 1px; }}
-  .details  {{ font-size: 19px; text-align: left; border-top: 5px solid black;
+  .details  {{ font-size: 19px; text-align: left; border-top: 5px solid {border_colour};
                margin-top: 14px; padding-top: 12px; line-height: 1.9; }}
-  .footer   {{ margin-top: 12px; font-size: 13px; color: #666; }}
+  .footer   {{ margin-top: 12px; font-size: 13px; color: {status_col}; font-weight: bold; }}
   .printbtn {{
     display: block; width: 100%; margin-top: 14px; padding: 13px;
-    background: #28a745; color: white; border: none; font-size: 19px;
+    background: {btn_colour}; color: white; border: none; font-size: 19px;
     cursor: pointer; border-radius: 6px; font-family: Arial;
   }}
-  .printbtn:hover {{ background: #218838; }}
+  .printbtn:hover {{ background: {btn_hover}; }}
   @media print {{
     body {{ background: white; padding: 0; }}
     .printbtn {{ display: none; }}
-    .label {{ border: 8px solid black; }}
   }}
 </style>
 </head>
 <body>
 <div class="label">
   <div class="product">{ls['prod']}</div>
+  {reject_banner}
   <img src="data:image/png;base64,{qr_b64}" width="200"><br>
   <div class="bagid">{ls['id']}</div>
   <div class="details">
@@ -157,13 +207,13 @@ def render_label(ls: dict):
     <b>Operator:</b> {ls['operator']}<br>
     <b>Date/Time:</b> {ts}
   </div>
-  <div class="footer">Revolution Carbon Black — Pyrolysis Facility</div>
+  <div class="footer">{status_text}</div>
 </div>
 <button class="printbtn" onclick="window.print()">🖨️ Print Label</button>
 </body>
 </html>"""
 
-    st.components.v1.html(html, height=680, scrolling=False)
+    st.components.v1.html(html, height=760 if rejected else 680, scrolling=False)
 
 
 # ─────────────────────────────────────────────
@@ -206,14 +256,16 @@ def page_dashboard():
     df["timestamp"] = pd.to_datetime(df["timestamp"])
 
     # ── Top KPIs ──
-    inv  = df[df["status"] == "Inventory"]
-    ship = df[df["status"] == "Shipped"]
+    inv      = df[df["status"] == "Inventory"]
+    ship     = df[df["status"] == "Shipped"]
+    rejected = df[df["status"] == "Rejected"]
 
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Total Bags Produced",  len(df))
-    k2.metric("Currently in Inventory", len(inv))
-    k3.metric("Total Shipped",         len(ship))
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Total Bags Produced",       len(df))
+    k2.metric("Currently in Inventory",    len(inv))
+    k3.metric("Total Shipped",             len(ship))
     k4.metric("Total Weight in Stock (lbs)", f"{inv['weight_lbs'].sum():,.0f}")
+    k5.metric("🚫 Rejected Bags",          len(rejected))
 
     st.markdown("---")
 
@@ -277,7 +329,7 @@ def page_production():
         with c1:
             weight = st.number_input("Weight (lbs)", min_value=0.0, value=2000.0, step=10.0)
             hard   = st.number_input("Pellet Hardness", min_value=0, value=0, step=1)
-            moist  = st.number_input("Moisture %", min_value=0.0, value=0.0, format="%.2f")
+            moist  = st.number_input("Moisture %  ⚠️ max 1.0%", min_value=0.0, value=0.0, format="%.2f")
         with c2:
             tol = st.number_input("Toluene", min_value=0, value=0, step=1)
             ash = st.number_input("Ash %",   min_value=0.0, value=0.0, format="%.2f")
@@ -285,20 +337,28 @@ def page_production():
         submitted = st.form_submit_button("✅ Record & Print Label", use_container_width=True)
 
     if submitted:
+        failures = qc_check(moist, ash, hard, tol)
+        is_rejected = len(failures) > 0
         now = datetime.now()
         bid = f"RCB-{now.strftime('%Y%m%d-%H%M%S')}"
+
+        # Rejected bags are recorded but NOT assigned a warehouse slot
+        bag_status = "Rejected" if is_rejected else "Inventory"
+        bag_loc    = "REJECTED"  if is_rejected else loc
+
         conn = get_conn()
         c = conn.cursor()
         try:
             c.execute(
                 """INSERT INTO test_results
-                   (bag_ref,timestamp,operator,product,location_id,
+                   (bag_ref,timestamp,operator,product,location_id,status,
                     weight_lbs,pellet_hardness,moisture,toluene,ash_content)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                 (bid, now, st.session_state["user_display"],
-                 prod, loc, weight, hard, moist, tol, ash),
+                 prod, bag_loc, bag_status, weight, hard, moist, tol, ash),
             )
-            c.execute("UPDATE locations SET status='Occupied' WHERE loc_id=?", (loc,))
+            if not is_rejected:
+                c.execute("UPDATE locations SET status='Occupied' WHERE loc_id=?", (loc,))
             conn.commit()
         except sqlite3.IntegrityError:
             st.error("Duplicate bag ID — please try again.")
@@ -306,18 +366,24 @@ def page_production():
             return
         conn.close()
 
-        st.success(f"✅ Bag **{bid}** recorded at location **{loc}**")
+        if is_rejected:
+            st.error(f"🚫 Bag **{bid}** REJECTED — " + " | ".join(failures))
+        else:
+            st.success(f"✅ Bag **{bid}** recorded at location **{loc}**")
+
         st.session_state["last_sack"] = {
-            "id":       bid,
-            "prod":     prod,
-            "loc":      loc,
-            "weight":   weight,
-            "ash":      ash,
-            "hard":     hard,
-            "moist":    moist,
-            "tol":      tol,
-            "operator": st.session_state["user_display"],
-            "ts":       now.strftime("%Y-%m-%d %H:%M:%S"),
+            "id":             bid,
+            "prod":           prod,
+            "loc":            bag_loc,
+            "weight":         weight,
+            "ash":            ash,
+            "hard":           hard,
+            "moist":          moist,
+            "tol":            tol,
+            "operator":       st.session_state["user_display"],
+            "ts":             now.strftime("%Y-%m-%d %H:%M:%S"),
+            "rejected":       is_rejected,
+            "reject_reasons": failures,
         }
 
     if "last_sack" in st.session_state:
@@ -462,7 +528,7 @@ def page_records():
         with f1:
             prod_f = st.selectbox("Product", ["All"] + PRODUCTS)
         with f2:
-            stat_f = st.selectbox("Status", ["All", "Inventory", "Shipped"])
+            stat_f = st.selectbox("Status", ["All", "Inventory", "Shipped", "Rejected"])
         with f3:
             date_from = st.date_input("From date", value=date(2020, 1, 1))
             date_to   = st.date_input("To date",   value=date.today())
