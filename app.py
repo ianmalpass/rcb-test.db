@@ -84,6 +84,38 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+    # Bagging runs log
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS bagging_ops (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp       DATETIME,
+            operator        TEXT,
+            source_sack_id  TEXT,
+            product         TEXT,
+            bag_size_unit   TEXT,
+            quantity        INTEGER,
+            pallet_id       TEXT
+        )
+    """)
+
+    # Individual small bags produced from a bagging run
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS small_bags (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            bag_ref         TEXT UNIQUE,
+            timestamp       DATETIME,
+            operator        TEXT,
+            product         TEXT,
+            bag_size_unit   TEXT,
+            source_sack_id  TEXT,
+            pallet_id       TEXT,
+            status          TEXT DEFAULT 'Inventory',
+            customer_name   TEXT DEFAULT 'In Inventory',
+            shipped_date    TEXT DEFAULT 'Not Shipped',
+            shipped_by      TEXT DEFAULT 'N/A'
+        )
+    """)
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS locations (
             loc_id TEXT PRIMARY KEY,
@@ -217,8 +249,240 @@ def render_label(ls: dict):
 
 
 # ─────────────────────────────────────────────
+#  BOX / PALLET LABEL
+# ─────────────────────────────────────────────
+def render_box_label(info: dict, copy_num: int = 1, total_copies: int = 1):
+    """
+    Render a single box/pallet/gaylord label.
+    info keys: product, bag_size_unit, qty, total_weight_str,
+               pallet_id, source_sack_id, operator, date_str, run_ref
+    """
+    qr_data = f"{info['run_ref']} | {info['product']} | {info['bag_size_unit']} x {info['qty']} | {info['pallet_id']}"
+    qr_b64  = generate_qr_b64(qr_data)
+
+    copy_line = f"Copy {copy_num} of {total_copies}" if total_copies > 1 else ""
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * {{ box-sizing:border-box; margin:0; padding:0; }}
+  body {{ background:#d8d8d8; font-family:Arial,sans-serif; padding:14px; }}
+  .label {{
+    width:100%; max-width:620px; margin:0 auto; padding:26px;
+    border:10px solid black; background:white; text-align:center;
+  }}
+  .product {{
+    font-size:54px; font-weight:900; letter-spacing:2px;
+    border-bottom:6px solid black; padding-bottom:12px; margin-bottom:14px;
+    text-transform:uppercase;
+  }}
+  .big-row {{
+    display:flex; justify-content:space-around; margin:10px 0 14px 0;
+  }}
+  .big-cell {{
+    text-align:center;
+  }}
+  .big-label {{ font-size:15px; color:#555; text-transform:uppercase; letter-spacing:1px; }}
+  .big-value {{ font-size:38px; font-weight:900; line-height:1.1; }}
+  .qr-section {{ margin:10px 0; }}
+  .run-ref {{ font-size:15px; color:#444; margin-top:4px; letter-spacing:1px; }}
+  .divider {{ border-top:5px solid black; margin:14px 0; }}
+  .details {{
+    font-size:20px; text-align:left; line-height:2.0;
+  }}
+  .footer {{
+    margin-top:14px; font-size:13px; color:#666; border-top:2px solid #ccc; padding-top:8px;
+    display:flex; justify-content:space-between;
+  }}
+  .printbtn {{
+    display:block; width:100%; margin-top:14px; padding:13px;
+    background:#1a6fba; color:white; border:none; font-size:19px;
+    cursor:pointer; border-radius:6px; font-family:Arial;
+  }}
+  .printbtn:hover {{ background:#155a96; }}
+  @media print {{
+    body {{ background:white; padding:0; }}
+    .printbtn {{ display:none; }}
+    .label {{ page-break-inside:avoid; }}
+  }}
+</style>
+</head>
+<body>
+<div class="label">
+  <div class="product">{info["product"]}</div>
+
+  <div class="big-row">
+    <div class="big-cell">
+      <div class="big-label">Bag Size</div>
+      <div class="big-value">{info["bag_size_unit"]}</div>
+    </div>
+    <div class="big-cell">
+      <div class="big-label">No. of Bags</div>
+      <div class="big-value">{info["qty"]}</div>
+    </div>
+    <div class="big-cell">
+      <div class="big-label">Total Weight</div>
+      <div class="big-value">{info["total_weight_str"]}</div>
+    </div>
+  </div>
+
+  <div class="qr-section">
+    <img src="data:image/png;base64,{qr_b64}" width="180"><br>
+    <div class="run-ref">{info["run_ref"]}</div>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="details">
+    <b>Pallet / Box ID:</b> {info["pallet_id"]}<br>
+    <b>Source Sack:</b> {info["source_sack_id"]}<br>
+    <b>Date:</b> {info["date_str"]}&nbsp;&nbsp;&nbsp;<b>Operator:</b> {info["operator"]}
+  </div>
+
+  <div class="footer">
+    <span>Revolution Carbon Black — Pyrolysis Facility</span>
+    <span>{copy_line}</span>
+  </div>
+</div>
+<button class="printbtn" onclick="window.print()">🖨️ Print This Label</button>
+</body>
+</html>"""
+    st.components.v1.html(html, height=720, scrolling=False)
+
+
+# ─────────────────────────────────────────────
+#  BAGGING SECTION
+# ─────────────────────────────────────────────
+def page_bagging():
+    st.title("🛍️ Bagging Operations")
+    st.write("Assign a supersack from inventory to a bagging run and print the box/pallet label.")
+
+    # ── Load available supersacks ──
+    conn = get_conn()
+    sacks_df = pd.read_sql_query(
+        """SELECT bag_ref, product, location_id, weight_lbs
+           FROM test_results
+           WHERE status = 'Inventory'
+           ORDER BY timestamp ASC""",
+        conn
+    )
+    conn.close()
+
+    if sacks_df.empty:
+        st.warning("No supersacks currently in inventory to process.")
+        return
+
+    sack_options = {
+        f"{r.bag_ref}  —  {r.product}  @  {r.location_id}  ({r.weight_lbs:.0f} lbs)": r.bag_ref
+        for r in sacks_df.itertuples()
+    }
+    selected_label   = st.selectbox("Select Supersack to Process", list(sack_options.keys()))
+    selected_sack_id = sack_options[selected_label]
+
+    st.markdown("---")
+
+    with st.form("bagging_form", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            bag_size = st.selectbox("Bag Size", ["20kg", "25kg", "50lb", "1000lb", "Other"])
+            qty      = st.number_input("Number of bags filled", min_value=1, step=1, value=1)
+        with c2:
+            pallet      = st.text_input("Pallet / Gaylord Box ID", placeholder="e.g. PAL-001")
+            label_copies = st.number_input("Number of label copies to print", min_value=1, max_value=10, step=1, value=1)
+
+        submitted = st.form_submit_button("✅ Complete Bagging Run & Print Label", use_container_width=True)
+
+    if submitted:
+        if not pallet.strip():
+            st.error("Pallet / Box ID is required.")
+            return
+
+        now      = datetime.now()
+        operator = st.session_state["user_display"]
+        run_ref  = f"BAG-{now.strftime('%Y%m%d-%H%M%S')}"
+
+        # Calculate total weight
+        size_to_kg = {"20kg": 20, "25kg": 25, "50lb": 22.68, "1000lb": 453.6}
+        if bag_size in size_to_kg:
+            total_kg  = size_to_kg[bag_size] * int(qty)
+            total_lbs = total_kg * 2.20462
+            total_weight_str = f"{total_kg:.0f} kg / {total_lbs:.0f} lbs"
+        else:
+            total_weight_str = "— see operator"
+
+        # Fetch supersack details
+        conn = get_conn()
+        c    = conn.cursor()
+        c.execute("SELECT product, location_id FROM test_results WHERE bag_ref=?", (selected_sack_id,))
+        row  = c.fetchone()
+        if not row:
+            st.error("Supersack not found — it may have already been processed.")
+            conn.close()
+            return
+        product, loc_to_free = row
+
+        # 1. Log the bagging run (one row, no individual bag records needed)
+        c.execute(
+            """INSERT INTO bagging_ops
+               (timestamp, operator, source_sack_id, product, bag_size_unit, quantity, pallet_id)
+               VALUES (?,?,?,?,?,?,?)""",
+            (now, operator, selected_sack_id, product, bag_size, int(qty), pallet.strip())
+        )
+
+        # 2. Mark supersack consumed and free warehouse slot
+        c.execute("UPDATE test_results SET status='Consumed (Bagged)' WHERE bag_ref=?", (selected_sack_id,))
+        c.execute("UPDATE locations SET status='Available' WHERE loc_id=?", (loc_to_free,))
+        conn.commit()
+        conn.close()
+
+        st.success(
+            f"✅ Bagging run **{run_ref}** recorded. "
+            f"Supersack **{selected_sack_id}** consumed. "
+            f"Location **{loc_to_free}** is now free."
+        )
+
+        # 3. Store label info in session state for rendering
+        st.session_state["box_label"] = {
+            "run_ref":          run_ref,
+            "product":          product,
+            "bag_size_unit":    bag_size,
+            "qty":              int(qty),
+            "total_weight_str": total_weight_str,
+            "pallet_id":        pallet.strip(),
+            "source_sack_id":   selected_sack_id,
+            "operator":         operator,
+            "date_str":         now.strftime("%Y-%m-%d"),
+            "label_copies":     int(label_copies),
+        }
+
+    # ── Label printing area ──
+    if "box_label" in st.session_state:
+        info    = st.session_state["box_label"]
+        copies  = info["label_copies"]
+        st.markdown("---")
+        st.subheader(f"🏷️ Box Label — {info['product']}  |  {info['pallet_id']}")
+
+        if copies > 1:
+            st.info(f"Showing {copies} label copies — print each one individually or use Ctrl+P / Cmd+P on the page.")
+
+        for i in range(1, copies + 1):
+            if copies > 1:
+                st.caption(f"Copy {i} of {copies}")
+            render_box_label(info, copy_num=i, total_copies=copies)
+            if i < copies:
+                st.markdown("---")
+
+        if st.button("🗑️ Clear Label", use_container_width=True):
+            del st.session_state["box_label"]
+            st.rerun()
+
+
+# ─────────────────────────────────────────────
 #  LOGIN PAGE
 # ─────────────────────────────────────────────
+
 def login_page():
     st.title("🔒 RCB Inventory – Login")
     st.markdown("---")
@@ -302,7 +566,24 @@ def page_dashboard():
         q3.metric("Avg Toluene",    f"{qa['toluene']:.0f}")
         q4.metric("Avg Ash %",      f"{qa['ash_content']:.2f}")
 
+    # ── Small bags summary ──
+    st.markdown("---")
+    st.subheader("Small Bags Inventory")
+    conn2 = get_conn()
+    sb_df = pd.read_sql_query("SELECT * FROM small_bags", conn2)
+    conn2.close()
+    if sb_df.empty:
+        st.info("No small bags in system yet.")
+    else:
+        sb_inv  = sb_df[sb_df["status"] == "Inventory"]
+        sb_ship = sb_df[sb_df["status"] == "Shipped"]
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Small Bags in Stock",   len(sb_inv))
+        s2.metric("Small Bags Shipped",    len(sb_ship))
+        s3.metric("Total Small Bags Made", len(sb_df))
+
     # ── Recent activity ──
+    st.markdown("---")
     st.subheader("Recent Activity (last 10 records)")
     recent = df.sort_values("timestamp", ascending=False).head(10)[
         ["timestamp", "bag_ref", "product", "location_id", "status", "weight_lbs", "customer_name"]
@@ -512,50 +793,83 @@ def page_locations():
 def page_records():
     st.title("📋 Master Records")
 
-    conn = get_conn()
-    df = pd.read_sql_query(
-        "SELECT * FROM test_results ORDER BY timestamp DESC", conn
-    )
-    conn.close()
+    tab1, tab2, tab3 = st.tabs(["📦 Supersacks", "🛍️ Small Bags", "🗂️ Bagging Runs"])
 
-    if df.empty:
-        st.info("No records yet.")
-        return
+    # ── Tab 1: Supersacks ──
+    with tab1:
+        conn = get_conn()
+        df = pd.read_sql_query("SELECT * FROM test_results ORDER BY timestamp DESC", conn)
+        conn.close()
 
-    # ── Filters ──
-    with st.expander("🔎 Filter Records", expanded=True):
-        f1, f2, f3 = st.columns(3)
-        with f1:
-            prod_f = st.selectbox("Product", ["All"] + PRODUCTS)
-        with f2:
-            stat_f = st.selectbox("Status", ["All", "Inventory", "Shipped", "Rejected"])
-        with f3:
-            date_from = st.date_input("From date", value=date(2020, 1, 1))
-            date_to   = st.date_input("To date",   value=date.today())
+        if df.empty:
+            st.info("No supersack records yet.")
+        else:
+            with st.expander("🔎 Filter", expanded=True):
+                f1, f2, f3 = st.columns(3)
+                with f1:
+                    prod_f = st.selectbox("Product", ["All"] + PRODUCTS, key="rec_prod")
+                with f2:
+                    stat_f = st.selectbox("Status", ["All", "Inventory", "Shipped", "Rejected", "Consumed (Bagged)"], key="rec_stat")
+                with f3:
+                    date_from = st.date_input("From", value=date(2020, 1, 1), key="rec_from")
+                    date_to   = st.date_input("To",   value=date.today(),     key="rec_to")
 
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    mask = (
-        (df["timestamp"].dt.date >= date_from) &
-        (df["timestamp"].dt.date <= date_to)
-    )
-    if prod_f != "All":
-        mask &= df["product"] == prod_f
-    if stat_f != "All":
-        mask &= df["status"] == stat_f
-    filtered = df[mask]
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            mask = (df["timestamp"].dt.date >= date_from) & (df["timestamp"].dt.date <= date_to)
+            if prod_f != "All": mask &= df["product"] == prod_f
+            if stat_f != "All": mask &= df["status"]  == stat_f
+            filtered = df[mask]
 
-    st.markdown(f"**{len(filtered)} records** match your filters.")
-    st.dataframe(filtered, use_container_width=True, height=500)
+            st.markdown(f"**{len(filtered)} records** match your filters.")
+            st.dataframe(filtered, use_container_width=True, height=450)
+            csv = filtered.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Download Supersacks CSV", data=csv,
+                               file_name=f"supersacks_{date.today()}.csv", mime="text/csv")
 
-    # ── CSV Export ──
-    csv = filtered.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        label="⬇️ Download as CSV",
-        data=csv,
-        file_name=f"rcb_records_{date.today()}.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
+    # ── Tab 2: Small Bags ──
+    with tab2:
+        conn = get_conn()
+        sb_df = pd.read_sql_query("SELECT * FROM small_bags ORDER BY timestamp DESC", conn)
+        conn.close()
+
+        if sb_df.empty:
+            st.info("No small bag records yet.")
+        else:
+            with st.expander("🔎 Filter", expanded=True):
+                sf1, sf2, sf3 = st.columns(3)
+                with sf1:
+                    sb_prod = st.selectbox("Product", ["All"] + PRODUCTS, key="sb_prod")
+                with sf2:
+                    sb_stat = st.selectbox("Status", ["All", "Inventory", "Shipped"], key="sb_stat")
+                with sf3:
+                    sb_size = st.selectbox("Bag Size", ["All", "20kg", "25kg", "50lb", "1000lb", "Other"], key="sb_size")
+
+            sb_mask = pd.Series([True] * len(sb_df))
+            if sb_prod != "All": sb_mask &= sb_df["product"]       == sb_prod
+            if sb_stat != "All": sb_mask &= sb_df["status"]        == sb_stat
+            if sb_size != "All": sb_mask &= sb_df["bag_size_unit"] == sb_size
+            sb_filtered = sb_df[sb_mask]
+
+            st.markdown(f"**{len(sb_filtered)} small bags** match your filters.")
+            st.dataframe(sb_filtered, use_container_width=True, height=450)
+            csv2 = sb_filtered.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Download Small Bags CSV", data=csv2,
+                               file_name=f"small_bags_{date.today()}.csv", mime="text/csv")
+
+    # ── Tab 3: Bagging Runs ──
+    with tab3:
+        conn = get_conn()
+        br_df = pd.read_sql_query("SELECT * FROM bagging_ops ORDER BY timestamp DESC", conn)
+        conn.close()
+
+        if br_df.empty:
+            st.info("No bagging runs recorded yet.")
+        else:
+            st.markdown(f"**{len(br_df)} bagging run(s)** on record.")
+            st.dataframe(br_df, use_container_width=True, height=450)
+            csv3 = br_df.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Download Bagging Runs CSV", data=csv3,
+                               file_name=f"bagging_runs_{date.today()}.csv", mime="text/csv")
 
 
 # ─────────────────────────────────────────────
@@ -578,6 +892,7 @@ def main():
         menu = [
             "📊 Dashboard",
             "🏗️ Production",
+            "🛍️ Bagging",
             "🚢 Shipping (FIFO)",
             "📂 Location Directory",
             "📋 View / Export Records",
@@ -593,6 +908,7 @@ def main():
     # ── Page Router ──
     if "Dashboard"   in choice: page_dashboard()
     elif "Production" in choice: page_production()
+    elif "Bagging"    in choice: page_bagging()
     elif "Shipping"   in choice: page_shipping()
     elif "Location"   in choice: page_locations()
     elif "Records"    in choice: page_records()
@@ -600,3 +916,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
