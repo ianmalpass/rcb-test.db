@@ -12,8 +12,8 @@ from io import BytesIO
 DB_PATH = "rcb_inventory.db"
 
 USERS = {
-    "admin":    "Admin1234",
-    "operator": "Op1234",
+    "admin":    "admin1234",
+    "operator": "op1234",
 }
 
 PRODUCTS = ["Revolution CB", "Paris CB"]
@@ -109,82 +109,61 @@ def generate_qr_b64(data: str) -> str:
 
 
 def render_label(ls: dict):
-    """Render a printable label inside a self-contained HTML page (popup approach)."""
+    """Render label inline as an iframe — works on Streamlit Cloud (no popup blocked)."""
     qr_b64 = generate_qr_b64(ls["id"])
     ts = ls.get("ts", "")
 
-    # Build a standalone HTML string that opens in a new tab and auto-prompts print
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-    <meta charset="UTF-8">
-    <title>Bag Label – {ls['id']}</title>
-    <style>
-      body {{ margin: 0; background: white; font-family: Arial, sans-serif; }}
-      .label {{
-        width: 700px; margin: 30px auto; padding: 30px;
-        border: 10px solid black; text-align: center;
-      }}
-      .product  {{ font-size: 56px; font-weight: 900; border-bottom: 6px solid black; padding-bottom: 12px; }}
-      .bagid    {{ font-size: 28px; font-weight: bold; margin-top: 8px; }}
-      .details  {{ font-size: 26px; text-align: left; border-top: 6px solid black;
-                   margin-top: 20px; padding-top: 15px; line-height: 1.7; }}
-      .footer   {{ margin-top: 20px; font-size: 18px; color: #555; }}
-      @media print {{
-        .no-print {{ display: none; }}
-        body {{ margin: 0; }}
-      }}
-    </style>
-    </head>
-    <body>
-    <div class="label">
-      <div class="product">{ls['prod']}</div>
-      <img src="data:image/png;base64,{qr_b64}" width="280"><br>
-      <div class="bagid">{ls['id']}</div>
-      <div class="details">
-        <b>Location:</b> {ls['loc']}<br>
-        <b>Weight:</b> {ls['weight']:.1f} lbs<br>
-        <b>Ash:</b> {ls['ash']:.2f}%&nbsp;&nbsp;&nbsp;<b>Hardness:</b> {int(ls['hard'])}<br>
-        <b>Moisture:</b> {ls['moist']:.2f}%&nbsp;&nbsp;&nbsp;<b>Toluene:</b> {ls['tol']}<br>
-        <b>Operator:</b> {ls['operator']}<br>
-        <b>Date/Time:</b> {ts}
-      </div>
-      <div class="footer">Revolution Carbon Black — Pyrolysis Facility</div>
-    </div>
-    <div class="no-print" style="text-align:center; margin: 20px;">
-      <button onclick="window.print()"
-        style="padding:14px 32px; background:#28a745; color:white;
-               border:none; font-size:20px; cursor:pointer; border-radius:6px;">
-        🖨️ Print Label
-      </button>
-    </div>
-    <script>
-      // small delay so the image renders before the dialog opens
-      setTimeout(() => window.print(), 600);
-    </script>
-    </body>
-    </html>
-    """
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ background: #e8e8e8; font-family: Arial, sans-serif; padding: 12px; }}
+  .label {{
+    width: 100%; max-width: 660px; margin: 0 auto;
+    padding: 22px; border: 8px solid black;
+    background: white; text-align: center;
+  }}
+  .product  {{ font-size: 44px; font-weight: 900;
+               border-bottom: 5px solid black; padding-bottom: 10px; margin-bottom: 10px; }}
+  .bagid    {{ font-size: 20px; font-weight: bold; margin-top: 6px; letter-spacing: 1px; }}
+  .details  {{ font-size: 19px; text-align: left; border-top: 5px solid black;
+               margin-top: 14px; padding-top: 12px; line-height: 1.9; }}
+  .footer   {{ margin-top: 12px; font-size: 13px; color: #666; }}
+  .printbtn {{
+    display: block; width: 100%; margin-top: 14px; padding: 13px;
+    background: #28a745; color: white; border: none; font-size: 19px;
+    cursor: pointer; border-radius: 6px; font-family: Arial;
+  }}
+  .printbtn:hover {{ background: #218838; }}
+  @media print {{
+    body {{ background: white; padding: 0; }}
+    .printbtn {{ display: none; }}
+    .label {{ border: 8px solid black; }}
+  }}
+</style>
+</head>
+<body>
+<div class="label">
+  <div class="product">{ls['prod']}</div>
+  <img src="data:image/png;base64,{qr_b64}" width="200"><br>
+  <div class="bagid">{ls['id']}</div>
+  <div class="details">
+    <b>Location:</b> {ls['loc']}<br>
+    <b>Weight:</b> {ls['weight']:.1f} lbs<br>
+    <b>Ash:</b> {ls['ash']:.2f}% &nbsp;|&nbsp; <b>Hardness:</b> {int(ls['hard'])}<br>
+    <b>Moisture:</b> {ls['moist']:.2f}% &nbsp;|&nbsp; <b>Toluene:</b> {ls['tol']}<br>
+    <b>Operator:</b> {ls['operator']}<br>
+    <b>Date/Time:</b> {ts}
+  </div>
+  <div class="footer">Revolution Carbon Black — Pyrolysis Facility</div>
+</div>
+<button class="printbtn" onclick="window.print()">🖨️ Print Label</button>
+</body>
+</html>"""
 
-    b64 = base64.b64encode(html.encode()).decode()
-    href = f"data:text/html;base64,{b64}"
-
-    st.markdown(
-        f"""
-        <a href="{href}" target="_blank"
-           style="display:inline-block; padding:14px 32px; background:#28a745;
-                  color:white; text-decoration:none; font-size:18px;
-                  border-radius:6px; font-family:Arial;">
-           🖨️ Open & Print Label (new tab)
-        </a>
-        &nbsp;
-        <span style="font-size:16px; color:#555;">
-            Bag <b>{ls['id']}</b> → Location <b>{ls['loc']}</b>
-        </span>
-        """,
-        unsafe_allow_html=True,
-    )
+    st.components.v1.html(html, height=680, scrolling=False)
 
 
 # ─────────────────────────────────────────────
@@ -199,7 +178,7 @@ def login_page():
         password = st.text_input("Password", type="password")
         if st.button("Login", use_container_width=True):
             uname = username.strip().lower()
-            if uname in USERS and USERS[uname] == password.strip():
+            if uname in USERS and USERS[uname] == password.strip().lower():
                 st.session_state["logged_in"]    = True
                 st.session_state["user_display"] = uname.capitalize()
                 st.session_state["role"]         = "admin" if uname == "admin" else "operator"
@@ -207,7 +186,7 @@ def login_page():
             else:
                 st.error("Invalid username or password.")
 
-    st.caption("Default credentials — admin / Admin1234 · operator / Op1234")
+    st.caption("Default credentials — admin / admin1234 · operator / op1234")
 
 
 # ─────────────────────────────────────────────
