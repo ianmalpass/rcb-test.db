@@ -7,40 +7,40 @@ from datetime import datetime, timedelta, date
 import qrcode
 import base64
 from io import BytesIO
+import random
 
 # --- CONFIGURATION ---
 DB_PATH = "rcb_inventory_v14.db"
 
-# --- SELF-HEALING DATABASE INITIALIZATION ---
+# --- SELF-HEALING DATABASE ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # 1. Create Tables if they don't exist
+    # Main Production Table
     c.execute('''CREATE TABLE IF NOT EXISTS test_results (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     bag_ref TEXT UNIQUE,
                     timestamp DATETIME,
                     operator TEXT,
+                    shipped_by TEXT,
                     product TEXT,
                     location_id TEXT,
                     status TEXT DEFAULT 'Inventory',
+                    customer_name TEXT DEFAULT 'In Inventory',
+                    shipped_date TEXT DEFAULT 'Not Shipped',
                     weight_lbs REAL,
                     pellet_hardness INTEGER,
                     moisture REAL,
                     toluene INTEGER,
                     ash_content REAL)''')
     
-    # 2. SCHEMA FIX: Automatically add missing columns to prevent OperationalErrors
-    columns_to_add = [
-        ('customer_name', "TEXT DEFAULT 'In Inventory'"),
-        ('shipped_date', "TEXT DEFAULT 'Not Shipped'"),
-        ('shipped_by', "TEXT DEFAULT 'N/A'")
-    ]
-    for col_name, col_type in columns_to_add:
-        try:
-            c.execute(f"ALTER TABLE test_results ADD COLUMN {col_name} {col_type}")
-        except sqlite3.OperationalError:
-            pass # Column already exists
+    # Auto-fix missing columns
+    columns = [('customer_name', "TEXT DEFAULT 'In Inventory'"), 
+               ('shipped_date', "TEXT DEFAULT 'Not Shipped'"),
+               ('shipped_by', "TEXT DEFAULT 'N/A'")]
+    for col, definition in columns:
+        try: c.execute(f"ALTER TABLE test_results ADD COLUMN {col} {definition}")
+        except sqlite3.OperationalError: pass
             
     c.execute('''CREATE TABLE IF NOT EXISTS locations (loc_id TEXT PRIMARY KEY, status TEXT DEFAULT 'Available')''')
     c.execute('''CREATE TABLE IF NOT EXISTS bagging_ops (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME, operator TEXT, product TEXT, bag_size_lbs REAL, quantity INTEGER, pallet_id TEXT)''')
@@ -52,15 +52,39 @@ def init_db():
     conn.commit()
     conn.close()
 
+# --- TEST SIMULATION ENGINE ---
+def run_test_simulation():
+    conn = sqlite3.connect(DB_PATH); c = conn.cursor()
+    c.execute("DELETE FROM test_results") # Clear for clean test
+    c.execute("UPDATE locations SET status = 'Available'")
+    
+    prods = ["Revolution CB", "Paris CB"]
+    # 1. Create 50 Bags
+    for i in range(50):
+        p = prods[0] if i < 25 else prods[1]
+        ts = (datetime.now() - timedelta(days=random.randint(1, 10))).strftime("%Y-%m-%d %H:%M:%S")
+        bid = f"TEST-{random.randint(1000,9999)}-{i}"
+        loc = f"WH-{(i+1):03d}"
+        c.execute("INSERT INTO test_results (bag_ref, timestamp, operator, product, location_id, weight_lbs, status) VALUES (?,?,?,?,?,2000.0,'Inventory')", (bid, ts, "Tester", p, loc))
+        c.execute("UPDATE locations SET status = 'Occupied' WHERE loc_id = ?", (loc,))
+    
+    # 2. Ship 25 of each
+    for p in prods:
+        c.execute("SELECT bag_ref, location_id FROM test_results WHERE product=? AND status='Inventory' LIMIT 25", (p,))
+        rows = c.fetchall()
+        for bid, loc in rows:
+            c.execute("UPDATE test_results SET status='Shipped', customer_name='Test Client', shipped_date=? WHERE bag_ref=?", (date.today().strftime("%Y-%m-%d"), bid))
+            c.execute("UPDATE locations SET status='Available' WHERE loc_id=?", (loc,))
+    conn.commit(); conn.close()
+    return "Simulation Complete: 50 Created, 50 Shipped (25 each)."
+
 # --- HELPERS ---
 def generate_qr_base64(data):
     qr = qrcode.QRCode(version=1, box_size=10, border=2)
-    qr.add_data(data)
-    qr.make(fit=True)
+    qr.add_data(data); qr.make(fit=True)
     img = qr.make_image(fill_color="black", back_color="white")
-    buffered = BytesIO()
-    img.save(buffered, format="PNG")
-    return base64.b64encode(buffered.getvalue()).decode()
+    buf = BytesIO(); img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
 
 def get_next_available_location():
     conn = sqlite3.connect(DB_PATH); c = conn.cursor()
@@ -73,134 +97,85 @@ def main():
     st.set_page_config(page_title="AI-sistant", layout="wide")
     init_db()
 
-    if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
-
-    if not st.session_state['logged_in']:
-        st.title("🔒 AI-sistant Login")
+    if not st.session_state.get('logged_in'):
+        st.title("🔒 Login")
         u = st.text_input("Username")
-        p = st.text_input("Password", type='password')
-        if st.button("Login"):
-            if u.lower() in ["admin", "operator"]:
-                st.session_state.update({"logged_in": True, "user_display": u.capitalize()})
-                st.rerun()
+        if st.button("Login") and u.lower() in ['admin', 'operator']:
+            st.session_state.update({'logged_in': True, 'user_display': u.capitalize()})
+            st.rerun()
     else:
+        # --- SIDEBAR & TEST TRIGGER ---
         st.sidebar.title("AI-sistant")
+        if st.sidebar.checkbox("🛠️ Dev Mode"):
+            if st.sidebar.button("🧪 Run Test Simulation"):
+                msg = run_test_simulation()
+                st.sidebar.success(msg); st.rerun()
+
         menu = ["Production Dashboard", "Production (Inventory)", "Shipping (FIFO)", "Stock Inquiry (Grid Map)", "View Records"]
         choice = st.sidebar.selectbox("Go to:", menu)
 
-        # --- 1. DASHBOARD ---
-        if choice == "Production Dashboard":
-            st.title("📊 Production & Shipping Dashboard")
-            d_start = st.sidebar.date_input("Start Date", value=date.today() - timedelta(days=30))
-            d_end = st.sidebar.date_input("End Date", value=date.today())
-            s_date, e_date = d_start.strftime("%Y-%m-%d 00:00:00"), d_end.strftime("%Y-%m-%d 23:59:59")
-            conn = sqlite3.connect(DB_PATH)
-            bulk_df = pd.read_sql_query(f"SELECT * FROM test_results WHERE timestamp BETWEEN '{s_date}' AND '{e_date}'", conn)
-            bag_df = pd.read_sql_query(f"SELECT * FROM bagging_ops WHERE timestamp BETWEEN '{s_date}' AND '{e_date}'", conn)
-            ship_df = pd.read_sql_query(f"SELECT * FROM test_results WHERE status = 'Shipped' AND timestamp BETWEEN '{s_date}' AND '{e_date}'", conn)
-            conn.close()
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Rev Sacks Made", len(bulk_df[bulk_df['product'] == 'Revolution CB']))
-            c2.metric("Par Sacks Made", len(bulk_df[bulk_df['product'] == 'Paris CB']))
-            c3.metric("Total Shipped", len(ship_df))
-            c4.metric("Small Bags Produced", int(bag_df['quantity'].sum()) if not bag_df.empty else 0)
-
-        # --- 2. PRODUCTION (STABILIZED) ---
-        elif choice == "Production (Inventory)":
-            st.title("🏗️ Bulk Production")
-            next_loc = get_next_available_location()
-            if not next_loc:
-                st.error("🚨 Warehouse Full!")
-            else:
-                with st.form("prod_form", clear_on_submit=True):
-                    st.info(f"📍 Assigned: **{next_loc}**")
-                    prod = st.selectbox("Product", ["Revolution CB", "Paris CB"])
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        weight = st.number_input("Weight (lbs)", value=2000.0)
-                        hard = st.number_input("Hardness", min_value=0)
-                    with c2:
-                        moist = st.number_input("Moisture %", format="%.2f")
-                        tol = st.number_input("Toluene", step=1)
-                        ash = st.number_input("Ash %", format="%.1f")
-                    if st.form_submit_button("Record & Print"):
-                        # FIX: Added unique microseconds to prevent IntegrityError
-                        bag_id = f"RCB-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}"
-                        conn = sqlite3.connect(DB_PATH); c = conn.cursor()
-                        try:
-                            c.execute("INSERT INTO test_results (bag_ref, timestamp, operator, product, location_id, weight_lbs, pellet_hardness, moisture, toluene, ash_content) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                                      (bag_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), st.session_state['user_display'], prod, next_loc, weight, hard, moist, tol, ash))
-                            c.execute("UPDATE locations SET status = 'Occupied' WHERE loc_id = ?", (next_loc,))
-                            conn.commit()
-                            st.session_state['last_sack'] = {"id": bag_id, "prod": prod, "loc": next_loc, "weight": weight, "ash": ash, "hard": hard, "moist": moist}
-                            st.session_state['show_label'] = True
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Save Error: {e}")
-                        finally:
-                            conn.close()
-
-            if st.session_state.get('show_label') and 'last_sack' in st.session_state:
-                ls = st.session_state['last_sack']
-                qr_code = generate_qr_base64(ls['id'])
-                label_html = f"""<div id="print-area" style="width:60%; padding:30px; border:10px solid black; font-family:Arial; background:white; color:black; margin:auto; text-align:center;">
-                    <div style="font-size:60px; font-weight:900; border-bottom:6px solid black;">{ls['prod']}</div>
-                    <div style="padding:20px 0;"><img src="data:image/png;base64,{qr_code}" style="width:320px;"><br><div style="font-size:40px; font-weight:bold;">{ls['id']}</div></div>
-                    <div style="font-size:32px; border-top:6px solid black; padding-top:15px; text-align:left; line-height:1.4;">
-                        <b>LOC:</b> {ls['loc']} | <b>WT:</b> {ls['weight']:.1f} lbs<br><b>ASH:</b> {ls['ash']:.1f}% | <b>HARD:</b> {int(ls['hard'])}<br><b>MOIST:</b> {ls['moist']:.2f}%
-                    </div></div><br><div style="text-align:center;">
-                    <button onclick="window.print()" style="padding:15px 30px; background:#28a745; color:white; border:none; font-size:20px; cursor:pointer; border-radius:8px;">🖨️ PRINT LABEL</button>
-                    <button onclick="window.location.reload()" style="padding:15px 30px; background:#6c757d; color:white; border:none; font-size:20px; cursor:pointer; border-radius:8px; margin-left:10px;">Done / Clear</button>
-                </div><style>@media print {{ body * {{ visibility: hidden; }} #print-area, #print-area * {{ visibility: visible; }} #print-area {{ position: absolute; left:20%; top:5%; width:60%; }} }}</style>"""
-                st.components.v1.html(label_html, height=950)
-
-        # --- 3. SHIPPING (FIFO STABILIZED) ---
-        elif choice == "Shipping (FIFO)":
-            st.title("🚢 Auto-Dispatch (FIFO)")
-            ship_prod = st.selectbox("Select Product to Ship", ["Revolution CB", "Paris CB"])
-            conn = sqlite3.connect(DB_PATH); c = conn.cursor()
-            c.execute("SELECT bag_ref, location_id, timestamp FROM test_results WHERE product = ? AND status = 'Inventory' ORDER BY timestamp ASC LIMIT 1", (ship_prod,))
-            oldest = c.fetchone()
-            if oldest:
-                st.metric("Go to Location", oldest[1])
-                with st.form("ship_f"):
-                    cust = st.text_input("Customer Name")
-                    if st.form_submit_button("Ship Oldest Bag"):
-                        if cust:
-                            c.execute("UPDATE test_results SET status='Shipped', customer_name=?, shipped_date=?, shipped_by=? WHERE bag_ref=?", 
-                                      (cust, date.today().strftime("%Y-%m-%d"), st.session_state['user_display'], oldest[0]))
-                            c.execute("UPDATE locations SET status='Available' WHERE loc_id=?", (oldest[1],))
-                            conn.commit(); conn.close(); st.balloons(); st.rerun()
-                        else: st.error("Enter customer name.")
-            else: st.warning("No stock."); conn.close()
-
-        # --- 4. GRID MAP (STABILIZED CONTRAST) ---
-        elif choice == "Stock Inquiry (Grid Map)":
+        # --- GRID MAP (FIXED CONTRAST) ---
+        if choice == "Stock Inquiry (Grid Map)":
             st.title("🔎 Warehouse Visual Grid")
             conn = sqlite3.connect(DB_PATH)
-            loc_query = "SELECT l.loc_id, l.status, t.product FROM locations l LEFT JOIN test_results t ON l.loc_id = t.location_id AND t.status = 'Inventory' ORDER BY l.loc_id ASC"
-            df = pd.read_sql_query(loc_query, conn); conn.close()
-            df['color_val'] = df.apply(lambda r: 0 if r['status'] == 'Available' else (1 if r['product'] == 'Revolution CB' else 2), axis=1)
-            df['t_color'] = df['product'].apply(lambda p: 'black' if p == 'Paris CB' else 'white')
-            df['display_num'] = df['loc_id'].str.extract('(\d+)')
-            
-            z_data = df['color_val'].values.reshape(10, 10)
-            number_labels = df['display_num'].values.reshape(10, 10)
-            t_colors_flat = df['t_color'].tolist() # FIX: Fixed flat list mapping
+            df = pd.read_sql_query("SELECT l.loc_id, l.status, t.product FROM locations l LEFT JOIN test_results t ON l.loc_id = t.location_id AND t.status = 'Inventory' ORDER BY l.loc_id ASC", conn)
+            conn.close()
+            df['val'] = df.apply(lambda r: 0 if r['status'] == 'Available' else (1 if r['product'] == 'Revolution CB' else 2), axis=1)
+            df['txt'] = df['product'].apply(lambda p: 'black' if p == 'Paris CB' else 'white')
+            df['num'] = df['loc_id'].str.extract('(\d+)')
             
             fig = go.Figure(data=go.Heatmap(
-                z=z_data, text=number_labels, texttemplate="<b>%{text}</b>",
-                textfont={"size": 32, "family": "Arial Black", "color": t_colors_flat},
-                colorscale=[[0,'#28a745'],[0.5,'#000000'],[1,'#ffc107']], showscale=False, xgap=8, ygap=8
+                z=df['val'].values.reshape(10,10), text=df['num'].values.reshape(10,10), texttemplate="<b>%{text}</b>",
+                textfont={"size": 32, "family": "Arial Black", "color": df['txt'].tolist()},
+                colorscale=[[0, '#28a745'], [0.5, '#000000'], [1, '#ffc107']], showscale=False, xgap=8, ygap=8
             ))
-            fig.update_layout(height=900, xaxis_visible=False, yaxis_visible=False, scaleanchor="x")
+            fig.update_layout(height=850, xaxis_visible=False, yaxis_visible=False, scaleanchor="x")
             st.plotly_chart(fig, use_container_width=True)
 
-        # --- 5. VIEW RECORDS ---
-        elif choice == "View Records":
-            st.title("📊 Master Ledger")
+        # --- PRODUCTION ---
+        elif choice == "Production (Inventory)":
+            st.title("🏗️ Production")
+            loc = get_next_available_location()
+            if loc:
+                with st.form("p", clear_on_submit=True):
+                    st.info(f"Loc: {loc}")
+                    p = st.selectbox("Product", ["Revolution CB", "Paris CB"])
+                    w = st.number_input("Weight", 2000.0)
+                    if st.form_submit_button("Record"):
+                        bid = f"RCB-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}"
+                        conn = sqlite3.connect(DB_PATH); c = conn.cursor()
+                        c.execute("INSERT INTO test_results (bag_ref,timestamp,operator,product,location_id,weight_lbs) VALUES (?,?,?,?,?,?)",(bid,datetime.now(),st.session_state['user_display'],p,loc,w))
+                        c.execute("UPDATE locations SET status='Occupied' WHERE loc_id=?",(loc,))
+                        conn.commit(); conn.close(); st.success(f"Saved {bid}"); st.rerun()
+
+        # --- SHIPPING ---
+        elif choice == "Shipping (FIFO)":
+            st.title("🚢 FIFO Shipping")
+            p = st.selectbox("Product", ["Revolution CB", "Paris CB"])
+            conn = sqlite3.connect(DB_PATH); c = conn.cursor()
+            c.execute("SELECT bag_ref, location_id FROM test_results WHERE product=? AND status='Inventory' ORDER BY timestamp ASC LIMIT 1",(p,))
+            res = c.fetchone()
+            if res:
+                st.metric("Go to Loc", res[1])
+                cust = st.text_input("Customer")
+                if st.button("Confirm") and cust:
+                    c.execute("UPDATE test_results SET status='Shipped', customer_name=?, shipped_date=? WHERE bag_ref=?", (cust, date.today(), res[0]))
+                    c.execute("UPDATE locations SET status='Available' WHERE loc_id=?", (res[1],))
+                    conn.commit(); conn.close(); st.rerun()
+            else: st.warning("No stock"); conn.close()
+
+        # --- DASHBOARD & RECORDS ---
+        elif choice == "Production Dashboard":
+            st.title("📊 Dashboard")
             conn = sqlite3.connect(DB_PATH)
-            st.dataframe(pd.read_sql_query("SELECT * FROM test_results ORDER BY timestamp DESC", conn), use_container_width=True)
+            df = pd.read_sql_query("SELECT * FROM test_results", conn); conn.close()
+            st.metric("Total Made", len(df))
+            st.metric("Total Shipped", len(df[df['status'] == 'Shipped']))
+            
+        elif choice == "View Records":
+            st.title("📊 Records")
+            conn = sqlite3.connect(DB_PATH)
+            st.dataframe(pd.read_sql_query("SELECT * FROM test_results ORDER BY timestamp DESC", conn))
             conn.close()
 
 if __name__ == '__main__':
